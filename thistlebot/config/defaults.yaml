@@ -1,0 +1,12 @@
+gateway:
+  host: "127.0.0.1"
+  port: 7788
+ollama:
+  base_url: "http://localhost:11434"
+  model: "qwen2.5:0.5b"
+github:
+  client_id: "Ov23likecnqtFvsVynK2"
+  token: null
+mcp:
+  enabled: false
+  connectors: []
