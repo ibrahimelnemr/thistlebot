@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from difflib import SequenceMatcher
+import re
 from typing import Callable, Literal, TypedDict
 
 from langgraph.graph import END, START, StateGraph
@@ -9,6 +10,10 @@ from langgraph.graph import END, START, StateGraph
 from .chat_client import stream_chat
 
 Speaker = Literal["agent_a", "agent_b"]
+THINK_BLOCK_PATTERN = re.compile(
+    r"<think>.*?</think>|<thinking>.*?</thinking>|<THINK>.*?</THINK>|<THINKING>.*?</THINKING>|<\|begin_of_thought\|>.*?<\|end_of_thought\|>",
+    flags=re.DOTALL,
+)
 
 
 class MeetingState(TypedDict):
@@ -40,41 +45,70 @@ class MeetingConfig:
 def _default_system_prompt(speaker: Speaker) -> str:
     if speaker == "agent_a":
         return (
-            "You are agent_a in a live conversation with another participant. "
-            "Be conversational, clear, and engaged. Keep replies concise (2-5 sentences). "
-            "Directly address one point from the latest message, add one fresh angle or example, "
-            "and end with one open question to keep the discussion moving. "
-            "Avoid process language like writing reports, deliverables, action plans, or project steps."
+            "You are in a live one-on-one conversation with a user. "
+            "Your personality is curious, imaginative, and exploratory. "
+            "Prefer possibilities, analogies, and creative reframing over strict optimization. "
+            "Keep replies concise (2-5 sentences). Directly address one point from the latest message, "
+            "add one fresh angle or example, and end with one open question to keep the discussion moving. "
+            "Avoid process language like writing reports, deliverables, action plans, or project steps. "
+            "Never mention labels such as agent_a, agent_b, assistant, or system prompt. "
+            "Do not mirror the user's phrasing verbatim."
         )
     return (
-        "You are agent_b in a live conversation with another participant. "
-        "Use a thoughtful, slightly skeptical conversational tone. Keep replies concise (2-5 sentences). "
-        "Directly address one point from the latest message, add one fresh counterpoint or tradeoff, "
-        "and end with one open question to keep the discussion moving. "
-        "Avoid process language like writing reports, deliverables, action plans, or project steps."
+        "You are in a live one-on-one conversation with a user. "
+        "Your personality is pragmatic, precise, and skeptical. "
+        "Prefer concrete constraints, risk checks, and practical tradeoffs over expansive ideation. "
+        "Keep replies concise (2-5 sentences). Directly address one point from the latest message, "
+        "add one fresh counterpoint or tradeoff, and end with one open question to keep the discussion moving. "
+        "Avoid process language like writing reports, deliverables, action plans, or project steps. "
+        "Never mention labels such as agent_a, agent_b, assistant, or system prompt. "
+        "Do not mirror the user's phrasing verbatim."
     )
+
+
+def _speaker_style_hint(speaker: Speaker) -> str:
+    if speaker == "agent_a":
+        return (
+            "Style hint: keep a creative tone, use one analogy or imaginative example when natural, "
+            "and avoid sounding like a risk checklist."
+        )
+    return (
+        "Style hint: keep a practical tone, include one concrete constraint or failure mode, "
+        "and avoid sounding poetic or speculative."
+    )
+
+
+def _transcript_for_speaker(history: list[dict[str, str]], speaker: Speaker) -> str:
+    lines: list[str] = []
+    for item in history:
+        role = "Assistant" if item["speaker"] == speaker else "User"
+        lines.append(f"{role}: {item['content']}")
+    return "\n".join(lines)
 
 
 def _build_user_prompt(state: MeetingState, speaker: Speaker) -> str:
     history = state["history"]
     recent = history[-12:]
-    transcript = "\n".join(f"{item['speaker']}: {item['content']}" for item in recent)
+    transcript = _transcript_for_speaker(recent, speaker)
 
     directive = state.get("directive")
     directive_text = f"\nConversation repair directive: {directive}" if directive else ""
+    style_hint = _speaker_style_hint(speaker)
 
     return (
         "Continue this dialogue naturally. "
-        "Treat the latest message as coming from your conversation partner and respond directly.\n"
+        "Treat the latest message as a direct user message and respond naturally.\n"
         "Turn requirements:"
         " (1) reference one specific point from the latest message,"
         " (2) add one new thought/example/tradeoff not already stated,"
         " (3) end with one open question.\n"
-        "Avoid repeating prior phrasing and avoid project-management framing.\n"
+        f"{style_hint}\n"
+        "Avoid repeating prior phrasing and avoid project-management framing. "
+        "Do not use agent names or role labels in your response.\n"
         f"{directive_text}\n\n"
-        "Conversation so far:\n"
+        "Conversation so far (you are Assistant):\n"
         f"{transcript}\n\n"
-        f"Respond now as {speaker}:"
+        "Respond now to the User:"
     )
 
 
@@ -92,6 +126,50 @@ def _similarity(left: str, right: str) -> float:
     return SequenceMatcher(None, left_clean, right_clean).ratio()
 
 
+def _normalize_for_loop_check(text: str) -> str:
+    lowered = text.lower().strip()
+    lowered = re.sub(r"\s+", " ", lowered)
+    lowered = re.sub(r"[^a-z0-9 ?!.,]", "", lowered)
+    return lowered
+
+
+def _strip_thinking_blocks(text: str) -> str:
+    if not text:
+        return ""
+    cleaned = THINK_BLOCK_PATTERN.sub("", text)
+    return cleaned.strip()
+
+
+def _is_hard_loop(history: list[dict[str, str]]) -> bool:
+    if len(history) < 4:
+        return False
+
+    recent = history[-4:]
+    normalized = [_normalize_for_loop_check(item["content"]) for item in recent]
+
+    latest = history[-1]["content"]
+    latest_prev_same = history[-3]["content"]
+    other_latest = history[-2]["content"]
+    other_prev_same = history[-4]["content"]
+
+    same_a_similarity = _similarity(latest, latest_prev_same)
+    same_b_similarity = _similarity(other_latest, other_prev_same)
+
+    if same_a_similarity > 0.78 and same_b_similarity > 0.78:
+        return True
+
+    if normalized[0] == normalized[2] and normalized[1] == normalized[3]:
+        return True
+
+    if len(history) >= 6:
+        recent_six = [_normalize_for_loop_check(item["content"]) for item in history[-6:]]
+        unique_count = len({value for value in recent_six if value})
+        if unique_count <= 2:
+            return True
+
+    return False
+
+
 def _is_stagnating(history: list[dict[str, str]]) -> bool:
     if len(history) < 4:
         return False
@@ -103,7 +181,12 @@ def _is_stagnating(history: list[dict[str, str]]) -> bool:
     same_speaker_sim = _similarity(latest["content"], previous_same_speaker["content"])
     adjacent_turn_sim = _similarity(latest["content"], previous_turn["content"])
 
-    return same_speaker_sim > 0.86 or adjacent_turn_sim > 0.9
+    if same_speaker_sim > 0.84 or adjacent_turn_sim > 0.88:
+        return True
+
+    latest_norm = _normalize_for_loop_check(latest["content"])
+    prev_norm = _normalize_for_loop_check(previous_turn["content"])
+    return bool(latest_norm and latest_norm == prev_norm)
 
 
 def run_meeting_graph(
@@ -134,7 +217,8 @@ def run_meeting_graph(
             on_turn_chunk(chunk)
         on_turn_end()
 
-        updated_history = state["history"] + [{"speaker": speaker, "content": content.strip()}]
+        visible_content = _strip_thinking_blocks(content)
+        updated_history = state["history"] + [{"speaker": speaker, "content": visible_content}]
         next_speaker: Speaker = "agent_b" if speaker == "agent_a" else "agent_a"
 
         return {
@@ -151,24 +235,29 @@ def run_meeting_graph(
 
     def guard_node(state: MeetingState) -> dict:
         stagnation_count = state["stagnation_count"]
-        if _is_stagnating(state["history"]):
+        hard_loop = _is_hard_loop(state["history"])
+
+        if hard_loop:
+            stagnation_count += 2
+
+        is_stagnating_now = _is_stagnating(state["history"])
+        if is_stagnating_now:
             stagnation_count += 1
-        else:
-            stagnation_count = max(0, stagnation_count - 1)
 
         directive = None
         if stagnation_count >= 1:
             directive = (
                 "Do not repeat wording. Introduce a fresh angle (example, edge case, practical scenario, "
-                "or tradeoff), and end with one open question."
+                "or tradeoff), and end with one open question. Do not reuse the previous turn's question."
             )
         if stagnation_count >= 3:
             directive = (
                 "Hard reset your phrasing and topic angle while staying on theme. "
-                "Use a new concrete example and end with one open question."
+                "Use a new concrete example and end with one open question. "
+                "Shift to a different lens: social impact, failure mode, ethics, or implementation details."
             )
 
-        should_stop = state["turn_count"] >= state["max_turns"] or stagnation_count >= 5
+        should_stop = state["turn_count"] >= state["max_turns"] or stagnation_count >= 4
 
         return {
             "stagnation_count": stagnation_count,

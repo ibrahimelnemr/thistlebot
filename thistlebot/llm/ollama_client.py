@@ -39,6 +39,7 @@ class OllamaClient(BaseLLMClient):
             return message.get("content", "")
 
         def stream_chunks() -> Iterable[str]:
+            in_thinking = False
             with httpx.stream("POST", url, json=payload, timeout=self.timeout) as response:
                 response.raise_for_status()
                 for line in response.iter_lines():
@@ -49,8 +50,25 @@ class OllamaClient(BaseLLMClient):
                     except json.JSONDecodeError:
                         continue
                     message = data.get("message", {})
-                    chunk = message.get("content")
-                    if chunk:
-                        yield chunk
+                    thinking_chunk = message.get("thinking")
+                    if thinking_chunk:
+                        if not in_thinking:
+                            yield "<think>"
+                            in_thinking = True
+                        yield thinking_chunk
+
+                    content_chunk = message.get("content")
+                    if content_chunk:
+                        if in_thinking:
+                            yield "</think>"
+                            in_thinking = False
+                        yield content_chunk
+
+                    if data.get("done") and in_thinking:
+                        yield "</think>"
+                        in_thinking = False
+
+                if in_thinking:
+                    yield "</think>"
 
         return stream_chunks()

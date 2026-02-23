@@ -29,16 +29,28 @@ Thistlebot is a lightweight local AI assistant that wraps Ollama with a small ga
 	```bash
 	thistlebot chat
 	```
+	Display controls:
+	```bash
+	thistlebot chat --render-markdown
+	thistlebot chat --no-render-markdown
+	```
+	Streaming note: a `[loading...]` indicator appears before each assistant reply starts.
 
 6. Start an agent-to-agent meeting (Terminal B):
 	```bash
 	thistlebot meeting
 	```
+	Meeting output notes:
+	- `agent_a` and `agent_b` are colorized differently in terminal output.
+	- Thinking blocks such as `<think>...</think>` are shown as `[thinking...]` and stream live as indented dim text.
+	- A `[loading...]` indicator appears before each agent reply starts.
+	- Replies render as markdown by default (disable with `--no-render-markdown`).
 	Optional controls:
 	```bash
 	thistlebot meeting --max-turns 20
 	thistlebot meeting --model-a qwen2.5:0.5b --model-b qwen2.5:0.5b
 	thistlebot meeting --starter "are dogs better than cats"
+	thistlebot meeting --no-render-markdown
 	thistlebot meeting --system-a "Be playful and curious; always end with one open question."
 	thistlebot meeting --system-b "Be analytical and skeptical; challenge one point and ask one follow-up question."
 	```

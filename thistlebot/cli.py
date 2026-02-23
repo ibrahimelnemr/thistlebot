@@ -7,6 +7,8 @@ from typing import Optional
 import httpx
 import questionary
 import typer
+from rich.console import Console
+from rich.markdown import Markdown
 
 from .core.chat_client import stream_chat
 from .core.gateway import run_gateway
@@ -19,6 +21,212 @@ github_app = typer.Typer(help="GitHub integrations")
 ollama_app = typer.Typer(help="Ollama diagnostics")
 app.add_typer(github_app, name="github")
 app.add_typer(ollama_app, name="ollama")
+
+RICH_CONSOLE = Console()
+THINK_OPEN_MARKERS = (
+    "<think>",
+    "<thinking>",
+    "<THINK>",
+    "<THINKING>",
+    "<|begin_of_thought|>",
+)
+THINK_CLOSE_MARKERS = (
+    "</think>",
+    "</thinking>",
+    "</THINK>",
+    "</THINKING>",
+    "<|end_of_thought|>",
+)
+THISTLEBOT_ASCII = r"""
+ _______ _     _ _     _   _       _           _
+|__   __| |   (_) |   | | | |     | |         | |
+   | |  | |__  _| |___| |_| | ___ | |__   ___ | |_
+   | |  | '_ \| | / __| __| |/ _ \| '_ \ / _ \| __|
+   | |  | | | | | \__ \ |_| | (_) | |_) | (_) | |_
+   |_|  |_| |_|_|_|___/\__|_|\___/|_.__/ \___/ \__|
+"""
+
+
+def _print_banner() -> None:
+    typer.secho(THISTLEBOT_ASCII, fg="green")
+
+
+def _find_first_marker(text: str, markers: tuple[str, ...]) -> tuple[int, str] | None:
+    best_index = -1
+    best_marker = ""
+    for marker in markers:
+        index = text.find(marker)
+        if index == -1:
+            continue
+        if best_index == -1 or index < best_index:
+            best_index = index
+            best_marker = marker
+    if best_index == -1:
+        return None
+    return best_index, best_marker
+
+
+class StreamRenderer:
+    def __init__(
+        self,
+        *,
+        prefix: str = "",
+        color: str | None = None,
+        render_markdown: bool = True,
+        show_loading: bool = True,
+    ) -> None:
+        self.prefix = prefix
+        self.color = color
+        self.render_markdown = render_markdown
+        self.show_loading = show_loading
+        self.buffer = ""
+        self.in_thinking_block = False
+        self.visible_parts: list[str] = []
+        self._thinking_label_shown = False
+        self._thinking_stream_started = False
+        self._needs_prefix_after_thinking = False
+        self._started = False
+        self._loading_shown = False
+
+    def start(self) -> None:
+        if self.show_loading:
+            self._loading_shown = True
+            if self.color:
+                typer.secho(f"{self.prefix}[loading...]", fg=self.color, nl=False)
+            else:
+                typer.echo(f"{self.prefix}[loading...]", nl=False)
+        else:
+            if self.color:
+                typer.secho(self.prefix, fg=self.color, nl=False)
+            else:
+                typer.echo(self.prefix, nl=False)
+
+    def feed(self, chunk: str) -> None:
+        if not self._started:
+            self._start_response()
+        self.buffer += chunk
+        self._process_buffer(final=False)
+
+    def finish(self) -> str:
+        if not self._started:
+            self._start_response()
+        self._process_buffer(final=True)
+        visible_text = "".join(self.visible_parts).strip()
+
+        if self.render_markdown:
+            if visible_text:
+                typer.echo("")
+                RICH_CONSOLE.print(Markdown(visible_text))
+            else:
+                typer.echo("")
+        else:
+            typer.echo("")
+
+        return visible_text
+
+    def _emit_visible(self, text: str) -> None:
+        if not text:
+            return
+        self.visible_parts.append(text)
+        if self.render_markdown:
+            return
+        if self._needs_prefix_after_thinking:
+            if self.color:
+                typer.secho(self.prefix, fg=self.color, nl=False)
+            else:
+                typer.echo(self.prefix, nl=False)
+            self._needs_prefix_after_thinking = False
+        if self.color:
+            typer.secho(text, fg=self.color, nl=False)
+        else:
+            typer.echo(text, nl=False)
+
+    def _emit_thinking_marker(self) -> None:
+        if self._thinking_label_shown:
+            return
+        self._thinking_label_shown = True
+        typer.secho(" [thinking...]", fg="yellow")
+        if self.color:
+            typer.secho("  » ", fg=self.color, dim=True, nl=False)
+        else:
+            typer.secho("  » ", dim=True, nl=False)
+
+    def _emit_thinking_text(self, text: str) -> None:
+        if not text:
+            return
+        self._thinking_stream_started = True
+        style = "italic"
+        if self.color:
+            style = f"italic {self.color}"
+        RICH_CONSOLE.print(text, style=style, end="")
+
+    def _finish_thinking_block(self) -> None:
+        if not self._thinking_stream_started:
+            return
+        self._thinking_stream_started = False
+        self._needs_prefix_after_thinking = not self.render_markdown
+        typer.echo("")
+
+    def _start_response(self) -> None:
+        if self._started:
+            return
+        self._started = True
+        if self._loading_shown:
+            typer.echo("")
+            if self.color:
+                typer.secho(self.prefix, fg=self.color, nl=False)
+            else:
+                typer.echo(self.prefix, nl=False)
+        elif self.prefix:
+            if self.color:
+                typer.secho(self.prefix, fg=self.color, nl=False)
+            else:
+                typer.echo(self.prefix, nl=False)
+
+    def _process_buffer(self, *, final: bool) -> None:
+        max_open = max(len(marker) for marker in THINK_OPEN_MARKERS)
+        max_close = max(len(marker) for marker in THINK_CLOSE_MARKERS)
+
+        while True:
+            if self.in_thinking_block:
+                closing = _find_first_marker(self.buffer, THINK_CLOSE_MARKERS)
+                if closing is None:
+                    if final:
+                        self._emit_thinking_text(self.buffer)
+                        self._finish_thinking_block()
+                        self.buffer = ""
+                    else:
+                        if len(self.buffer) > max_close:
+                            safe = self.buffer[:-max_close]
+                            self._emit_thinking_text(safe)
+                            self.buffer = self.buffer[-max_close:]
+                    break
+                close_index, close_marker = closing
+                thinking_part = self.buffer[:close_index]
+                self._emit_thinking_text(thinking_part)
+                self.buffer = self.buffer[close_index + len(close_marker) :]
+                self.in_thinking_block = False
+                self._finish_thinking_block()
+                continue
+
+            opening = _find_first_marker(self.buffer, THINK_OPEN_MARKERS)
+            if opening is None:
+                if final:
+                    self._emit_visible(self.buffer)
+                    self.buffer = ""
+                else:
+                    if len(self.buffer) > max_open:
+                        safe = self.buffer[:-max_open]
+                        self._emit_visible(safe)
+                        self.buffer = self.buffer[-max_open:]
+                break
+
+            open_index, open_marker = opening
+            before = self.buffer[:open_index]
+            self._emit_visible(before)
+            self.buffer = self.buffer[open_index + len(open_marker) :]
+            self.in_thinking_block = True
+            self._emit_thinking_marker()
 
 
 def _gateway_url_from_config(config: dict) -> str:
@@ -91,6 +299,7 @@ def _select_primary_model(models: list[str], current_model: str) -> str:
 
 @app.command()
 def setup(force: bool = typer.Option(False, "--force", help="Overwrite existing config/prompts")) -> None:
+    _print_banner()
     setup_storage(force=force)
     config = load_config()
     typer.echo("Created ~/.thistlebot structure")
@@ -125,6 +334,7 @@ def setup(force: bool = typer.Option(False, "--force", help="Overwrite existing 
 
 @app.command()
 def reset() -> None:
+    _print_banner()
     config = reset_storage()
     typer.echo("Reset ~/.thistlebot config and prompts to defaults")
 
@@ -135,6 +345,7 @@ def reset() -> None:
 
 @ollama_app.command("check")
 def ollama_check() -> None:
+    _print_banner()
     config = load_config()
     base_url = _ollama_base_url_from_config(config)
 
@@ -172,7 +383,13 @@ def gateway(host: Optional[str] = None, port: Optional[int] = None) -> None:
 def chat(
     session: str = typer.Option("default", "--session"),
     model: Optional[str] = typer.Option(None, "--model"),
+    render_markdown: bool = typer.Option(
+        True,
+        "--render-markdown/--no-render-markdown",
+        help="Render assistant replies as markdown in the terminal",
+    ),
 ) -> None:
+    _print_banner()
     config = load_config()
     gateway_url = _gateway_url_from_config(config)
     _ensure_gateway_running(gateway_url)
@@ -200,11 +417,11 @@ def chat(
 
         messages.append({"role": "user", "content": prompt})
         try:
-            assistant_content = ""
+            renderer = StreamRenderer(prefix="assistant> ", render_markdown=render_markdown)
+            renderer.start()
             for chunk in stream_chat(gateway_url, messages, active_model, session):
-                assistant_content += chunk
-                typer.echo(chunk, nl=False)
-            typer.echo("")
+                renderer.feed(chunk)
+            assistant_content = renderer.finish()
             if assistant_content:
                 messages.append({"role": "assistant", "content": assistant_content})
         except Exception as exc:
@@ -233,7 +450,13 @@ def meeting(
         "--starter",
         help="First message used to start the agent-to-agent conversation",
     ),
+    render_markdown: bool = typer.Option(
+        True,
+        "--render-markdown/--no-render-markdown",
+        help="Render agent replies as markdown in the terminal",
+    ),
 ) -> None:
+    _print_banner()
     config = load_config()
     gateway_url = _gateway_url_from_config(config)
     _ensure_gateway_running(gateway_url)
@@ -250,7 +473,34 @@ def meeting(
     else:
         typer.echo("Press Ctrl+C to stop.")
 
-    typer.echo(f"agent_a> {starter}")
+    typer.secho("agent_a> ", fg="cyan", nl=False)
+    if render_markdown:
+        RICH_CONSOLE.print(Markdown(starter))
+    else:
+        typer.secho(starter)
+
+    active_turn_renderer: StreamRenderer | None = None
+
+    def _on_turn_start(speaker: str) -> None:
+        nonlocal active_turn_renderer
+        color = "cyan" if speaker == "agent_a" else "magenta"
+        active_turn_renderer = StreamRenderer(
+            prefix=f"{speaker}> ",
+            color=color,
+            render_markdown=render_markdown,
+        )
+        active_turn_renderer.start()
+
+    def _on_turn_chunk(chunk: str) -> None:
+        if active_turn_renderer is None:
+            return
+        active_turn_renderer.feed(chunk)
+
+    def _on_turn_end() -> None:
+        if active_turn_renderer is None:
+            typer.echo("")
+            return
+        active_turn_renderer.finish()
 
     try:
         run_meeting_graph(
@@ -264,9 +514,9 @@ def meeting(
                 system_b=system_b,
                 max_turns=max_turns,
             ),
-            on_turn_start=lambda speaker: typer.echo(f"{speaker}> ", nl=False),
-            on_turn_chunk=lambda chunk: typer.echo(chunk, nl=False),
-            on_turn_end=lambda: typer.echo(""),
+            on_turn_start=_on_turn_start,
+            on_turn_chunk=_on_turn_chunk,
+            on_turn_end=_on_turn_end,
         )
     except KeyboardInterrupt:
         typer.echo("\nMeeting stopped.")
