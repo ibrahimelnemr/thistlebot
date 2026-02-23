@@ -16,6 +16,7 @@ Thistlebot is a lightweight local AI assistant that wraps Ollama with a small ga
 	```bash
 	thistlebot setup
 	```
+   During setup, Thistlebot checks whether Ollama is reachable, lists available models, and prompts you to select the primary model.
    Optional reset to defaults:
 	```bash
 	thistlebot reset
@@ -42,6 +43,7 @@ Thistlebot is a lightweight local AI assistant that wraps Ollama with a small ga
 
 Optional checks:
 - Health endpoint: `curl http://127.0.0.1:7788/health`
+- Ollama check: `thistlebot ollama check`
 - GitHub login: `thistlebot github login`
 - GitHub status: `thistlebot github status`
 - GitHub repos: `thistlebot github repos --limit 20`

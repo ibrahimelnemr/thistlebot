@@ -5,6 +5,7 @@ import webbrowser
 from typing import Optional
 
 import httpx
+import questionary
 import typer
 
 from .core.chat_client import stream_chat
@@ -15,7 +16,9 @@ from .storage.state import load_config, reset_storage, setup_storage, write_conf
 
 app = typer.Typer(add_completion=False)
 github_app = typer.Typer(help="GitHub integrations")
+ollama_app = typer.Typer(help="Ollama diagnostics")
 app.add_typer(github_app, name="github")
+app.add_typer(ollama_app, name="ollama")
 
 
 def _gateway_url_from_config(config: dict) -> str:
@@ -38,14 +41,86 @@ def _ensure_gateway_running(gateway_url: str) -> None:
         raise typer.Exit(code=1)
 
 
+def _ollama_base_url_from_config(config: dict) -> str:
+    ollama_cfg = config.get("ollama", {})
+    return ollama_cfg.get("base_url", "http://localhost:11434").rstrip("/")
+
+
+def _discover_ollama_models(base_url: str, timeout: float = 5.0) -> tuple[bool, list[str], Optional[str]]:
+    try:
+        response = httpx.get(f"{base_url}/api/tags", timeout=timeout)
+        response.raise_for_status()
+    except httpx.HTTPError as exc:
+        return False, [], str(exc)
+
+    payload = response.json() if response.content else {}
+    models = payload.get("models", []) if isinstance(payload, dict) else []
+    names = [item.get("name", "") for item in models if isinstance(item, dict) and item.get("name")]
+    return True, names, None
+
+
+def _no_models_found_message() -> str:
+    return (
+        "No models found. Check that Ollama is running and endpoint is configured properly "
+        "in ~/.thistlebot/config.json (ollama.base_url)."
+    )
+
+
+def _select_primary_model(models: list[str], current_model: str) -> str:
+    default_model = current_model if current_model in models else models[0]
+
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        typer.echo("Non-interactive terminal detected; selecting model automatically.")
+        return default_model
+
+    try:
+        selected = questionary.select(
+            "Select primary Ollama model",
+            choices=models,
+            default=default_model,
+        ).ask()
+    except Exception:
+        typer.echo("Interactive selector unavailable; selecting model automatically.")
+        return default_model
+
+    if selected is None:
+        typer.echo("Selection cancelled; keeping existing model.")
+        return current_model or default_model
+    return str(selected)
+
+
 @app.command()
 def setup(force: bool = typer.Option(False, "--force", help="Overwrite existing config/prompts")) -> None:
-    config = setup_storage(force=force)
+    setup_storage(force=force)
+    config = load_config()
     typer.echo("Created ~/.thistlebot structure")
 
-    ollama_url = config.get("ollama", {}).get("base_url", "")
-    if ollama_url:
-        typer.echo(f"Ollama base URL: {ollama_url}")
+    base_url = _ollama_base_url_from_config(config)
+    typer.echo(f"Ollama base URL: {base_url}")
+
+    reachable, models, error = _discover_ollama_models(base_url)
+    if not reachable:
+        typer.echo("Unable to reach Ollama at the configured endpoint.", err=True)
+        if error:
+            typer.echo(f"Connection error: {error}", err=True)
+        typer.echo(_no_models_found_message(), err=True)
+        return
+
+    typer.echo("Ollama is running.")
+    if not models:
+        typer.echo(_no_models_found_message(), err=True)
+        return
+
+    typer.echo(f"Discovered {len(models)} model(s):")
+    for model_name in models:
+        typer.echo(f"- {model_name}")
+
+    current_model = config.get("ollama", {}).get("model", "")
+    selected_model = _select_primary_model(models, current_model)
+    config.setdefault("ollama", {})
+    config["ollama"]["model"] = selected_model
+    write_config(config, force=True)
+    typer.echo(f"Primary model set to: {selected_model}")
 
 
 @app.command()
@@ -56,6 +131,36 @@ def reset() -> None:
     ollama_url = config.get("ollama", {}).get("base_url", "")
     if ollama_url:
         typer.echo(f"Ollama base URL: {ollama_url}")
+
+
+@ollama_app.command("check")
+def ollama_check() -> None:
+    config = load_config()
+    base_url = _ollama_base_url_from_config(config)
+
+    typer.echo(f"Ollama base URL: {base_url}")
+    reachable, models, error = _discover_ollama_models(base_url)
+
+    if not reachable:
+        typer.echo("Reachable: no")
+        if error:
+            typer.echo(f"Error: {error}", err=True)
+        typer.echo(_no_models_found_message(), err=True)
+        raise typer.Exit(code=1)
+
+    typer.echo("Reachable: yes")
+    typer.echo(f"Models found: {len(models)}")
+
+    if not models:
+        typer.echo(_no_models_found_message(), err=True)
+        raise typer.Exit(code=1)
+
+    for model_name in models:
+        typer.echo(f"- {model_name}")
+
+    configured_model = config.get("ollama", {}).get("model", "")
+    if configured_model:
+        typer.echo(f"Configured primary model: {configured_model}")
 
 
 @app.command()
