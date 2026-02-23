@@ -38,7 +38,9 @@ Thistlebot is a lightweight local AI assistant that wraps Ollama with a small ga
 	```bash
 	thistlebot meeting --max-turns 20
 	thistlebot meeting --model-a qwen2.5:0.5b --model-b qwen2.5:0.5b
-	thistlebot meeting --starter "Propose and refine a 3-step coding plan"
+	thistlebot meeting --starter "are dogs better than cats"
+	thistlebot meeting --system-a "Be playful and curious; always end with one open question."
+	thistlebot meeting --system-b "Be analytical and skeptical; challenge one point and ask one follow-up question."
 	```
 
 Optional checks:

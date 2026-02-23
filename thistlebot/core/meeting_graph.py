@@ -32,37 +32,56 @@ class MeetingConfig:
     model_a: str
     model_b: str
     starter: str
+    system_a: str | None = None
+    system_b: str | None = None
     max_turns: int = 0
 
 
-def _speaker_goal(speaker: Speaker) -> str:
+def _default_system_prompt(speaker: Speaker) -> str:
     if speaker == "agent_a":
-        return "You are the proposer. Add a concrete idea, plan, or decision each turn."
-    return "You are the critic-editor. Improve, challenge, or tighten the last proposal with specifics."
+        return (
+            "You are agent_a in a live conversation with another participant. "
+            "Be conversational, clear, and engaged. Keep replies concise (2-5 sentences). "
+            "Directly address one point from the latest message, add one fresh angle or example, "
+            "and end with one open question to keep the discussion moving. "
+            "Avoid process language like writing reports, deliverables, action plans, or project steps."
+        )
+    return (
+        "You are agent_b in a live conversation with another participant. "
+        "Use a thoughtful, slightly skeptical conversational tone. Keep replies concise (2-5 sentences). "
+        "Directly address one point from the latest message, add one fresh counterpoint or tradeoff, "
+        "and end with one open question to keep the discussion moving. "
+        "Avoid process language like writing reports, deliverables, action plans, or project steps."
+    )
 
 
-def _build_prompt(state: MeetingState, speaker: Speaker) -> str:
+def _build_user_prompt(state: MeetingState, speaker: Speaker) -> str:
     history = state["history"]
     recent = history[-12:]
     transcript = "\n".join(f"{item['speaker']}: {item['content']}" for item in recent)
 
     directive = state.get("directive")
-    directive_text = f"\nGuardrail directive: {directive}" if directive else ""
+    directive_text = f"\nConversation repair directive: {directive}" if directive else ""
 
     return (
-        f"{_speaker_goal(speaker)}\n"
-        "Do not ask for more details or clarification."
-        " Move the conversation forward with concrete content."
-        " Keep response concise and specific.\n"
-        "Allowed moves:"
-        " (1) add a new actionable point,"
-        " (2) improve the previous point,"
-        " (3) summarize a decision and next step.\n"
+        "Continue this dialogue naturally. "
+        "Treat the latest message as coming from your conversation partner and respond directly.\n"
+        "Turn requirements:"
+        " (1) reference one specific point from the latest message,"
+        " (2) add one new thought/example/tradeoff not already stated,"
+        " (3) end with one open question.\n"
+        "Avoid repeating prior phrasing and avoid project-management framing.\n"
         f"{directive_text}\n\n"
         "Conversation so far:\n"
         f"{transcript}\n\n"
         f"Respond now as {speaker}:"
     )
+
+
+def _speaker_system_prompt(config: MeetingConfig, speaker: Speaker) -> str:
+    if speaker == "agent_a":
+        return (config.system_a or "").strip() or _default_system_prompt("agent_a")
+    return (config.system_b or "").strip() or _default_system_prompt("agent_b")
 
 
 def _similarity(left: str, right: str) -> float:
@@ -97,13 +116,17 @@ def run_meeting_graph(
 
     def agent_turn(state: MeetingState, speaker: Speaker) -> dict:
         model = state["model_a"] if speaker == "agent_a" else state["model_b"]
-        prompt = _build_prompt(state, speaker)
+        user_prompt = _build_user_prompt(state, speaker)
+        system_prompt = _speaker_system_prompt(config, speaker)
 
         on_turn_start(speaker)
         content = ""
         for chunk in stream_chat(
             gateway_url=state["gateway_url"],
-            messages=[{"role": "user", "content": prompt}],
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
             model=model,
             session_id=f"{state['session_id']}-{speaker}",
         ):
@@ -135,9 +158,15 @@ def run_meeting_graph(
 
         directive = None
         if stagnation_count >= 1:
-            directive = "Do not ask questions. Provide 2 concrete options and choose one."
+            directive = (
+                "Do not repeat wording. Introduce a fresh angle (example, edge case, practical scenario, "
+                "or tradeoff), and end with one open question."
+            )
         if stagnation_count >= 3:
-            directive = "End with a concise decision and 2 actionable next steps."
+            directive = (
+                "Hard reset your phrasing and topic angle while staying on theme. "
+                "Use a new concrete example and end with one open question."
+            )
 
         should_stop = state["turn_count"] >= state["max_turns"] or stagnation_count >= 5
 

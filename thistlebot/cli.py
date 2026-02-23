@@ -217,6 +217,16 @@ def meeting(
     session: str = typer.Option("meeting", "--session"),
     model_a: Optional[str] = typer.Option(None, "--model-a"),
     model_b: Optional[str] = typer.Option(None, "--model-b"),
+    system_a: Optional[str] = typer.Option(
+        None,
+        "--system-a",
+        help="Optional system prompt override for agent_a",
+    ),
+    system_b: Optional[str] = typer.Option(
+        None,
+        "--system-b",
+        help="Optional system prompt override for agent_b",
+    ),
     max_turns: int = typer.Option(0, "--max-turns", min=0, help="0 means run until Ctrl+C"),
     starter: str = typer.Option(
         "Let's discuss one practical idea we can improve today.",
@@ -250,6 +260,8 @@ def meeting(
                 model_a=selected_model_a,
                 model_b=selected_model_b,
                 starter=starter,
+                system_a=system_a,
+                system_b=system_b,
                 max_turns=max_turns,
             ),
             on_turn_start=lambda speaker: typer.echo(f"{speaker}> ", nl=False),
