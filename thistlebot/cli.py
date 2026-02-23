@@ -9,12 +9,33 @@ import typer
 
 from .core.chat_client import stream_chat
 from .core.gateway import run_gateway
+from .core.meeting_graph import MeetingConfig, run_meeting_graph
 from .integrations.github.oauth import login_with_device_flow, poll_for_token
 from .storage.state import load_config, reset_storage, setup_storage, write_config
 
 app = typer.Typer(add_completion=False)
 github_app = typer.Typer(help="GitHub integrations")
 app.add_typer(github_app, name="github")
+
+
+def _gateway_url_from_config(config: dict) -> str:
+    gateway_cfg = config.get("gateway", {})
+    host = gateway_cfg.get("host", "127.0.0.1")
+    port = int(gateway_cfg.get("port", 7788))
+    return f"http://{host}:{port}"
+
+
+def _ensure_gateway_running(gateway_url: str) -> None:
+    health_url = f"{gateway_url.rstrip('/')}/health"
+    try:
+        response = httpx.get(health_url, timeout=3.0)
+        response.raise_for_status()
+    except httpx.HTTPError:
+        typer.echo(
+            f"Gateway not reachable at {gateway_url}. Start it with 'thistlebot gateway'.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
 
 
 @app.command()
@@ -46,9 +67,10 @@ def gateway(host: Optional[str] = None, port: Optional[int] = None) -> None:
 def chat(
     session: str = typer.Option("default", "--session"),
     model: Optional[str] = typer.Option(None, "--model"),
-    gateway_url: str = typer.Option("http://127.0.0.1:7788", "--gateway"),
 ) -> None:
     config = load_config()
+    gateway_url = _gateway_url_from_config(config)
+    _ensure_gateway_running(gateway_url)
     active_model = model or config.get("ollama", {}).get("model", "llama3")
 
     typer.echo("Type a message. Use :exit to quit, :reset to clear session, :model <name> to switch.")
@@ -83,6 +105,57 @@ def chat(
         except Exception as exc:
             typer.echo(f"Error: {exc}", err=True)
             sys.exit(1)
+
+
+@app.command()
+def meeting(
+    session: str = typer.Option("meeting", "--session"),
+    model_a: Optional[str] = typer.Option(None, "--model-a"),
+    model_b: Optional[str] = typer.Option(None, "--model-b"),
+    max_turns: int = typer.Option(0, "--max-turns", min=0, help="0 means run until Ctrl+C"),
+    starter: str = typer.Option(
+        "Let's discuss one practical idea we can improve today.",
+        "--starter",
+        help="First message used to start the agent-to-agent conversation",
+    ),
+) -> None:
+    config = load_config()
+    gateway_url = _gateway_url_from_config(config)
+    _ensure_gateway_running(gateway_url)
+
+    active_model = config.get("ollama", {}).get("model", "llama3")
+    selected_model_a = model_a or active_model
+    selected_model_b = model_b or active_model
+
+    typer.echo(f"Meeting started via {gateway_url}")
+    typer.echo(f"agent_a model: {selected_model_a}")
+    typer.echo(f"agent_b model: {selected_model_b}")
+    if max_turns > 0:
+        typer.echo(f"Max turns: {max_turns}")
+    else:
+        typer.echo("Press Ctrl+C to stop.")
+
+    typer.echo(f"agent_a> {starter}")
+
+    try:
+        run_meeting_graph(
+            config=MeetingConfig(
+                gateway_url=gateway_url,
+                session_id=session,
+                model_a=selected_model_a,
+                model_b=selected_model_b,
+                starter=starter,
+                max_turns=max_turns,
+            ),
+            on_turn_start=lambda speaker: typer.echo(f"{speaker}> ", nl=False),
+            on_turn_chunk=lambda chunk: typer.echo(chunk, nl=False),
+            on_turn_end=lambda: typer.echo(""),
+        )
+    except KeyboardInterrupt:
+        typer.echo("\nMeeting stopped.")
+    except Exception as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=1)
 
 
 @github_app.command("login")

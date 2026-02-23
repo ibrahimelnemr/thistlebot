@@ -29,6 +29,17 @@ Thistlebot is a lightweight local AI assistant that wraps Ollama with a small ga
 	thistlebot chat
 	```
 
+6. Start an agent-to-agent meeting (Terminal B):
+	```bash
+	thistlebot meeting
+	```
+	Optional controls:
+	```bash
+	thistlebot meeting --max-turns 20
+	thistlebot meeting --model-a qwen2.5:0.5b --model-b qwen2.5:0.5b
+	thistlebot meeting --starter "Propose and refine a 3-step coding plan"
+	```
+
 Optional checks:
 - Health endpoint: `curl http://127.0.0.1:7788/health`
 - GitHub login: `thistlebot github login`
