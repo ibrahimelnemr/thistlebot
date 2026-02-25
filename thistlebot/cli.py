@@ -12,6 +12,7 @@ from rich.markdown import Markdown
 
 from .core.chat_client import stream_chat
 from .core.gateway import run_gateway
+from .core.gateway_lifecycle import ensure_gateway
 from .core.meeting_graph import MeetingConfig, run_meeting_graph
 from .integrations.github.oauth import login_with_device_flow, poll_for_token
 from .storage.state import load_config, reset_storage, setup_storage, write_config
@@ -236,17 +237,11 @@ def _gateway_url_from_config(config: dict) -> str:
     return f"http://{host}:{port}"
 
 
-def _ensure_gateway_running(gateway_url: str) -> None:
-    health_url = f"{gateway_url.rstrip('/')}/health"
-    try:
-        response = httpx.get(health_url, timeout=3.0)
-        response.raise_for_status()
-    except httpx.HTTPError:
-        typer.echo(
-            f"Gateway not reachable at {gateway_url}. Start it with 'thistlebot gateway'.",
-            err=True,
-        )
-        raise typer.Exit(code=1)
+def _gateway_host_port_from_config(config: dict) -> tuple[str, int]:
+    gateway_cfg = config.get("gateway", {})
+    host = gateway_cfg.get("host", "127.0.0.1")
+    port = int(gateway_cfg.get("port", 7788))
+    return host, port
 
 
 def _ollama_base_url_from_config(config: dict) -> str:
@@ -383,6 +378,17 @@ def gateway(host: Optional[str] = None, port: Optional[int] = None) -> None:
 def chat(
     session: str = typer.Option("default", "--session"),
     model: Optional[str] = typer.Option(None, "--model"),
+    auto_gateway: bool = typer.Option(
+        True,
+        "--auto-gateway/--no-auto-gateway",
+        help="Automatically start the gateway if it is not already running",
+    ),
+    gateway_start_timeout: float = typer.Option(
+        15.0,
+        "--gateway-start-timeout",
+        min=1.0,
+        help="Seconds to wait for an auto-started gateway to become healthy",
+    ),
     render_markdown: bool = typer.Option(
         True,
         "--render-markdown/--no-render-markdown",
@@ -392,41 +398,52 @@ def chat(
     _print_banner()
     config = load_config()
     gateway_url = _gateway_url_from_config(config)
-    _ensure_gateway_running(gateway_url)
+    gateway_host, gateway_port = _gateway_host_port_from_config(config)
     active_model = model or config.get("ollama", {}).get("model", "llama3")
 
-    typer.echo("Type a message. Use :exit to quit, :reset to clear session, :model <name> to switch.")
-    messages: list[dict[str, str]] = []
+    try:
+        with ensure_gateway(
+            gateway_url,
+            gateway_host,
+            gateway_port,
+            autostart=auto_gateway,
+            start_timeout=gateway_start_timeout,
+        ):
+            typer.echo("Type a message. Use :exit to quit, :reset to clear session, :model <name> to switch.")
+            messages: list[dict[str, str]] = []
 
-    while True:
-        try:
-            prompt = typer.prompt("you")
-        except typer.Abort:
-            break
+            while True:
+                try:
+                    prompt = typer.prompt("you")
+                except typer.Abort:
+                    break
 
-        if prompt.strip() == ":exit":
-            break
-        if prompt.strip() == ":reset":
-            messages = []
-            typer.echo("Session reset")
-            continue
-        if prompt.startswith(":model "):
-            active_model = prompt.replace(":model ", "", 1).strip() or active_model
-            typer.echo(f"Model set to {active_model}")
-            continue
+                if prompt.strip() == ":exit":
+                    break
+                if prompt.strip() == ":reset":
+                    messages = []
+                    typer.echo("Session reset")
+                    continue
+                if prompt.startswith(":model "):
+                    active_model = prompt.replace(":model ", "", 1).strip() or active_model
+                    typer.echo(f"Model set to {active_model}")
+                    continue
 
-        messages.append({"role": "user", "content": prompt})
-        try:
-            renderer = StreamRenderer(prefix="assistant> ", render_markdown=render_markdown)
-            renderer.start()
-            for chunk in stream_chat(gateway_url, messages, active_model, session):
-                renderer.feed(chunk)
-            assistant_content = renderer.finish()
-            if assistant_content:
-                messages.append({"role": "assistant", "content": assistant_content})
-        except Exception as exc:
-            typer.echo(f"Error: {exc}", err=True)
-            sys.exit(1)
+                messages.append({"role": "user", "content": prompt})
+                try:
+                    renderer = StreamRenderer(prefix="assistant> ", render_markdown=render_markdown)
+                    renderer.start()
+                    for chunk in stream_chat(gateway_url, messages, active_model, session):
+                        renderer.feed(chunk)
+                    assistant_content = renderer.finish()
+                    if assistant_content:
+                        messages.append({"role": "assistant", "content": assistant_content})
+                except Exception as exc:
+                    typer.echo(f"Error: {exc}", err=True)
+                    sys.exit(1)
+    except RuntimeError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1)
 
 
 @app.command()
@@ -434,6 +451,17 @@ def meeting(
     session: str = typer.Option("meeting", "--session"),
     model_a: Optional[str] = typer.Option(None, "--model-a"),
     model_b: Optional[str] = typer.Option(None, "--model-b"),
+    auto_gateway: bool = typer.Option(
+        True,
+        "--auto-gateway/--no-auto-gateway",
+        help="Automatically start the gateway if it is not already running",
+    ),
+    gateway_start_timeout: float = typer.Option(
+        15.0,
+        "--gateway-start-timeout",
+        min=1.0,
+        help="Seconds to wait for an auto-started gateway to become healthy",
+    ),
     system_a: Optional[str] = typer.Option(
         None,
         "--system-a",
@@ -459,67 +487,77 @@ def meeting(
     _print_banner()
     config = load_config()
     gateway_url = _gateway_url_from_config(config)
-    _ensure_gateway_running(gateway_url)
+    gateway_host, gateway_port = _gateway_host_port_from_config(config)
 
     active_model = config.get("ollama", {}).get("model", "llama3")
     selected_model_a = model_a or active_model
     selected_model_b = model_b or active_model
 
-    typer.echo(f"Meeting started via {gateway_url}")
-    typer.echo(f"agent_a model: {selected_model_a}")
-    typer.echo(f"agent_b model: {selected_model_b}")
-    if max_turns > 0:
-        typer.echo(f"Max turns: {max_turns}")
-    else:
-        typer.echo("Press Ctrl+C to stop.")
-
-    typer.secho("agent_a> ", fg="cyan", nl=False)
-    if render_markdown:
-        RICH_CONSOLE.print(Markdown(starter))
-    else:
-        typer.secho(starter)
-
-    active_turn_renderer: StreamRenderer | None = None
-
-    def _on_turn_start(speaker: str) -> None:
-        nonlocal active_turn_renderer
-        color = "cyan" if speaker == "agent_a" else "magenta"
-        active_turn_renderer = StreamRenderer(
-            prefix=f"{speaker}> ",
-            color=color,
-            render_markdown=render_markdown,
-        )
-        active_turn_renderer.start()
-
-    def _on_turn_chunk(chunk: str) -> None:
-        if active_turn_renderer is None:
-            return
-        active_turn_renderer.feed(chunk)
-
-    def _on_turn_end() -> None:
-        if active_turn_renderer is None:
-            typer.echo("")
-            return
-        active_turn_renderer.finish()
-
     try:
-        run_meeting_graph(
-            config=MeetingConfig(
-                gateway_url=gateway_url,
-                session_id=session,
-                model_a=selected_model_a,
-                model_b=selected_model_b,
-                starter=starter,
-                system_a=system_a,
-                system_b=system_b,
-                max_turns=max_turns,
-            ),
-            on_turn_start=_on_turn_start,
-            on_turn_chunk=_on_turn_chunk,
-            on_turn_end=_on_turn_end,
-        )
+        with ensure_gateway(
+            gateway_url,
+            gateway_host,
+            gateway_port,
+            autostart=auto_gateway,
+            start_timeout=gateway_start_timeout,
+        ):
+            typer.echo(f"Meeting started via {gateway_url}")
+            typer.echo(f"agent_a model: {selected_model_a}")
+            typer.echo(f"agent_b model: {selected_model_b}")
+            if max_turns > 0:
+                typer.echo(f"Max turns: {max_turns}")
+            else:
+                typer.echo("Press Ctrl+C to stop.")
+
+            typer.secho("agent_a> ", fg="cyan", nl=False)
+            if render_markdown:
+                RICH_CONSOLE.print(Markdown(starter))
+            else:
+                typer.secho(starter)
+
+            active_turn_renderer: StreamRenderer | None = None
+
+            def _on_turn_start(speaker: str) -> None:
+                nonlocal active_turn_renderer
+                color = "cyan" if speaker == "agent_a" else "magenta"
+                active_turn_renderer = StreamRenderer(
+                    prefix=f"{speaker}> ",
+                    color=color,
+                    render_markdown=render_markdown,
+                )
+                active_turn_renderer.start()
+
+            def _on_turn_chunk(chunk: str) -> None:
+                if active_turn_renderer is None:
+                    return
+                active_turn_renderer.feed(chunk)
+
+            def _on_turn_end() -> None:
+                if active_turn_renderer is None:
+                    typer.echo("")
+                    return
+                active_turn_renderer.finish()
+
+            run_meeting_graph(
+                config=MeetingConfig(
+                    gateway_url=gateway_url,
+                    session_id=session,
+                    model_a=selected_model_a,
+                    model_b=selected_model_b,
+                    starter=starter,
+                    system_a=system_a,
+                    system_b=system_b,
+                    max_turns=max_turns,
+                ),
+                on_turn_start=_on_turn_start,
+                on_turn_chunk=_on_turn_chunk,
+                on_turn_end=_on_turn_end,
+            )
     except KeyboardInterrupt:
         typer.echo("\nMeeting stopped.")
+    except RuntimeError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1)
     except Exception as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=1)
