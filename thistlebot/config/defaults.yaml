@@ -3,10 +3,44 @@ gateway:
   port: 7788
 ollama:
   base_url: "http://localhost:11434"
-  model: "qwen2.5:0.5b"
+  model: "qwen3:0.6b"
 github:
   client_id: "Ov23likecnqtFvsVynK2"
   token: null
+tools:
+  runtime:
+    enabled: true
+    max_iterations: 8
+  native:
+    enabled: true
+    workspace_root: "~/.thistlebot/workspace"
+    max_file_chars: 12000
+    exec:
+      enabled: true
+      require_approval: false
+      timeout_seconds: 45
+      max_output_chars: 12000
+      require_approval_for: []
 mcp:
   enabled: false
-  connectors: []
+  servers:
+    filesystem:
+      enabled: false
+      transport: stdio
+      command: npx
+      args: ["-y", "@modelcontextprotocol/server-filesystem", "~/.thistlebot/workspace"]
+      timeout_seconds: 30
+    git:
+      enabled: false
+      transport: stdio
+      command: uvx
+      args: ["mcp-server-git", "--repository", "~/.thistlebot/workspace"]
+      timeout_seconds: 30
+    github:
+      enabled: false
+      transport: stdio
+      command: npx
+      args: ["-y", "@github/github-mcp-server"]
+      env_from:
+        GITHUB_PERSONAL_ACCESS_TOKEN: "github.token"
+      timeout_seconds: 30

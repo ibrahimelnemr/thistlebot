@@ -27,15 +27,25 @@ class OllamaClient(BaseLLMClient):
         models = payload.get("models", [])
         return [item.get("name", "") for item in models if item.get("name")]
 
-    def chat(self, messages: list[dict[str, str]], model: str, stream: bool = False) -> str | Iterable[str]:
+    def chat(
+        self,
+        messages: list[dict],
+        model: str,
+        stream: bool = False,
+        tools: list[dict] | None = None,
+    ) -> str | dict | Iterable[str]:
         url = f"{self.base_url}/api/chat"
         payload = {"model": model, "messages": messages, "stream": stream}
+        if tools:
+            payload["tools"] = tools
 
         if not stream:
             response = httpx.post(url, json=payload, timeout=self.timeout)
             response.raise_for_status()
             data = response.json()
             message = data.get("message", {})
+            if message.get("tool_calls"):
+                return message
             return message.get("content", "")
 
         def stream_chunks() -> Iterable[str]:

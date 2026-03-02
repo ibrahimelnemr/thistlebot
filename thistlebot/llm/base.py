@@ -10,5 +10,11 @@ class BaseLLMClient(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def chat(self, messages: list[dict[str, str]], model: str, stream: bool = False) -> str | Iterable[str]:
+    def chat(
+        self,
+        messages: list[dict],
+        model: str,
+        stream: bool = False,
+        tools: list[dict] | None = None,
+    ) -> str | dict | Iterable[str]:
         raise NotImplementedError

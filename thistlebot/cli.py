@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import webbrowser
 from typing import Optional
+import json
 
 import httpx
 import questionary
@@ -14,14 +15,18 @@ from .core.chat_client import stream_chat
 from .core.gateway import run_gateway
 from .core.gateway_lifecycle import ensure_gateway
 from .core.meeting_graph import MeetingConfig, run_meeting_graph
+from .core.tools.registry import build_tool_registry
 from .integrations.github.oauth import login_with_device_flow, poll_for_token
+from .integrations.mcp.registry import build_mcp_registry
 from .storage.state import load_config, reset_storage, setup_storage, write_config
 
 app = typer.Typer(add_completion=False)
 github_app = typer.Typer(help="GitHub integrations")
 ollama_app = typer.Typer(help="Ollama diagnostics")
+mcp_app = typer.Typer(help="MCP integrations")
 app.add_typer(github_app, name="github")
 app.add_typer(ollama_app, name="ollama")
+app.add_typer(mcp_app, name="mcp")
 
 RICH_CONSOLE = Console()
 THINK_OPEN_MARKERS = (
@@ -244,6 +249,37 @@ def _gateway_host_port_from_config(config: dict) -> tuple[str, int]:
     return host, port
 
 
+def _render_tool_event(event: dict) -> None:
+    event_type = str(event.get("event") or "")
+    if event_type == "tool_call":
+        tool_name = str(event.get("tool") or "unknown")
+        args = event.get("args")
+        args_text = json.dumps(args, ensure_ascii=False) if isinstance(args, dict) else str(args)
+        if len(args_text) > 180:
+            args_text = f"{args_text[:180]}..."
+        typer.secho(f"\n[tool call] {tool_name}", fg="yellow")
+        typer.secho(f"  args: {args_text}", fg="yellow")
+        return
+
+    if event_type == "tool_result":
+        tool_name = str(event.get("tool") or "unknown")
+        ok = bool(event.get("ok"))
+        color = "green" if ok else "red"
+        status_text = "ok" if ok else "error"
+        typer.secho(f"[tool result] {tool_name} ({status_text})", fg=color)
+        error_text = event.get("error")
+        if error_text:
+            typer.secho(f"  error: {error_text}", fg="red")
+        content = str(event.get("content") or "").strip()
+        if content:
+            preview = content if len(content) <= 220 else f"{content[:220]}..."
+            typer.secho(f"  output: {preview}", fg=color)
+        return
+
+    raw = json.dumps(event, ensure_ascii=False)
+    typer.secho(f"[tool event] {raw}", fg="yellow")
+
+
 def _ollama_base_url_from_config(config: dict) -> str:
     ollama_cfg = config.get("ollama", {})
     return ollama_cfg.get("base_url", "http://localhost:11434").rstrip("/")
@@ -433,7 +469,13 @@ def chat(
                 try:
                     renderer = StreamRenderer(prefix="assistant> ", render_markdown=render_markdown)
                     renderer.start()
-                    for chunk in stream_chat(gateway_url, messages, active_model, session):
+                    for chunk in stream_chat(
+                        gateway_url,
+                        messages,
+                        active_model,
+                        session,
+                        on_event=_render_tool_event,
+                    ):
                         renderer.feed(chunk)
                     assistant_content = renderer.finish()
                     if assistant_content:
@@ -656,9 +698,47 @@ def github_repos(
             typer.echo(name)
 
 
+@mcp_app.command("status")
+def mcp_status() -> None:
+    config = load_config()
+    registry = build_mcp_registry(config)
+    statuses = registry.statuses()
+
+    if not config.get("mcp", {}).get("enabled"):
+        typer.echo("MCP is disabled (mcp.enabled=false).")
+        return
+
+    if not statuses:
+        typer.echo("No MCP servers configured or enabled.")
+        return
+
+    for status in statuses:
+        name = status.get("name", "unknown")
+        connected = "yes" if status.get("connected") else "no"
+        transport = status.get("transport", "stdio")
+        last_error = status.get("last_error")
+        typer.echo(f"{name}: connected={connected} transport={transport}")
+        if last_error:
+            typer.echo(f"  last_error={last_error}")
+
+
+@mcp_app.command("tools")
+def mcp_tools() -> None:
+    config = load_config()
+    mcp_registry = build_mcp_registry(config)
+    tool_registry = build_tool_registry(config, mcp_registry)
+    names = tool_registry.list_tool_names()
+    if not names:
+        typer.echo("No tools available.")
+        return
+
+    for name in names:
+        typer.echo(name)
+
+
 @app.command()
 def mcp_connect() -> None:
-    typer.echo("MCP connect scaffold ready. Configure connectors in ~/.thistlebot/config.json")
+    typer.echo("Deprecated. Use 'thistlebot mcp status' and 'thistlebot mcp tools'.")
 
 
 if __name__ == "__main__":
