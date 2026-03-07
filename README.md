@@ -1,6 +1,6 @@
 # Thistlebot
 
-Thistlebot is a lightweight local AI assistant that wraps Ollama with a small gateway service and a CLI chat client. It stores config, prompts, and session logs under `~/.thistlebot` for simple local workflows.
+Thistlebot is a lightweight AI assistant with a small gateway service and CLI chat client. It supports Ollama, OpenRouter, and generic OpenAI-compatible providers, and stores config/prompts/session logs under `~/.thistlebot`.
 
 ## Run locally
 1. Create and activate a virtual environment:
@@ -16,7 +16,7 @@ Thistlebot is a lightweight local AI assistant that wraps Ollama with a small ga
 	```bash
 	thistlebot setup
 	```
-   During setup, Thistlebot checks whether Ollama is reachable, lists available models, and prompts you to select the primary model.
+   During setup, Thistlebot prompts for provider (`ollama`, `openrouter`, or `openai_compatible`), checks endpoint reachability, lists available models when possible, and asks you to select the primary model.
    Optional reset to defaults:
 	```bash
 	thistlebot reset
@@ -58,6 +58,61 @@ Thistlebot is a lightweight local AI assistant that wraps Ollama with a small ga
 Optional checks:
 - Health endpoint: `curl http://127.0.0.1:7788/health`
 - Ollama check: `thistlebot ollama check`
+- Active provider check: `thistlebot llm check`
 - GitHub login: `thistlebot github login`
 - GitHub status: `thistlebot github status`
 - GitHub repos: `thistlebot github repos --limit 20`
+
+## Configure providers
+
+The setup command writes provider configuration into `~/.thistlebot/config.json`:
+
+```bash
+thistlebot setup
+```
+
+### OpenRouter (recommended via env var)
+
+```bash
+export OPENROUTER_API_KEY="sk-or-..."
+```
+
+Example config:
+
+```json
+{
+	"llm": {
+		"provider": "openrouter",
+		"model": "anthropic/claude-3.5-sonnet"
+	},
+	"providers": {
+		"openrouter": {
+			"base_url": "https://openrouter.ai/api/v1",
+			"api_key_env": "OPENROUTER_API_KEY"
+		}
+	}
+}
+```
+
+### Generic OpenAI-compatible endpoint
+
+```bash
+export OPENAI_API_KEY="your-key"
+```
+
+Example config:
+
+```json
+{
+	"llm": {
+		"provider": "openai_compatible",
+		"model": "meta-llama/Meta-Llama-3.1-8B-Instruct"
+	},
+	"providers": {
+		"openai_compatible": {
+			"base_url": "http://localhost:8000/v1",
+			"api_key_env": "OPENAI_API_KEY"
+		}
+	}
+}
+```

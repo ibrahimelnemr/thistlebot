@@ -18,14 +18,18 @@ from .core.meeting_graph import MeetingConfig, run_meeting_graph
 from .core.tools.registry import build_tool_registry
 from .integrations.github.oauth import login_with_device_flow, poll_for_token
 from .integrations.mcp.registry import build_mcp_registry
+from .llm.factory import get_default_model, get_llm_provider, get_provider_config, resolve_api_key
+from .llm.openai_compatible_client import OpenAICompatibleClient
 from .storage.state import load_config, reset_storage, setup_storage, write_config
 
 app = typer.Typer(add_completion=False)
 github_app = typer.Typer(help="GitHub integrations")
 ollama_app = typer.Typer(help="Ollama diagnostics")
+llm_app = typer.Typer(help="LLM provider diagnostics")
 mcp_app = typer.Typer(help="MCP integrations")
 app.add_typer(github_app, name="github")
 app.add_typer(ollama_app, name="ollama")
+app.add_typer(llm_app, name="llm")
 app.add_typer(mcp_app, name="mcp")
 
 RICH_CONSOLE = Console()
@@ -281,8 +285,18 @@ def _render_tool_event(event: dict) -> None:
 
 
 def _ollama_base_url_from_config(config: dict) -> str:
-    ollama_cfg = config.get("ollama", {})
-    return ollama_cfg.get("base_url", "http://localhost:11434").rstrip("/")
+    ollama_cfg = get_provider_config(config, "ollama")
+    return str(ollama_cfg.get("base_url", "http://localhost:11434")).rstrip("/")
+
+
+def _openrouter_base_url_from_config(config: dict) -> str:
+    cfg = get_provider_config(config, "openrouter")
+    return str(cfg.get("base_url", "https://openrouter.ai/api/v1")).rstrip("/")
+
+
+def _openai_compatible_base_url_from_config(config: dict) -> str:
+    cfg = get_provider_config(config, "openai_compatible")
+    return str(cfg.get("base_url", "http://localhost:8000/v1")).rstrip("/")
 
 
 def _discover_ollama_models(base_url: str, timeout: float = 5.0) -> tuple[bool, list[str], Optional[str]]:
@@ -298,6 +312,25 @@ def _discover_ollama_models(base_url: str, timeout: float = 5.0) -> tuple[bool, 
     return True, names, None
 
 
+def _discover_openai_compatible_models(
+    base_url: str,
+    api_key: str | None,
+    headers: dict[str, str] | None = None,
+    timeout: float = 10.0,
+) -> tuple[bool, list[str], Optional[str]]:
+    try:
+        client = OpenAICompatibleClient(
+            base_url=base_url,
+            api_key=api_key,
+            timeout=timeout,
+            default_headers=headers,
+        )
+        models = client.list_models()
+    except Exception as exc:
+        return False, [], str(exc)
+    return True, models, None
+
+
 def _no_models_found_message() -> str:
     return (
         "No models found. Check that Ollama is running and endpoint is configured properly "
@@ -305,7 +338,37 @@ def _no_models_found_message() -> str:
     )
 
 
-def _select_primary_model(models: list[str], current_model: str) -> str:
+def _no_provider_models_found_message(provider: str, base_url: str) -> str:
+    return (
+        f"No models found for provider '{provider}'. Check endpoint/auth configuration "
+        f"in ~/.thistlebot/config.json (providers.{provider}.base_url={base_url})."
+    )
+
+
+def _select_provider(current_provider: str) -> str:
+    choices = ["ollama", "openrouter", "openai_compatible"]
+    default_provider = current_provider if current_provider in choices else "ollama"
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        typer.echo("Non-interactive terminal detected; keeping configured provider.")
+        return default_provider
+
+    try:
+        selected = questionary.select(
+            "Select LLM provider",
+            choices=choices,
+            default=default_provider,
+        ).ask()
+    except Exception:
+        typer.echo("Interactive selector unavailable; keeping configured provider.")
+        return default_provider
+
+    if selected is None:
+        typer.echo("Selection cancelled; keeping existing provider.")
+        return default_provider
+    return str(selected)
+
+
+def _select_primary_model(models: list[str], current_model: str, provider: str) -> str:
     default_model = current_model if current_model in models else models[0]
 
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
@@ -314,7 +377,7 @@ def _select_primary_model(models: list[str], current_model: str) -> str:
 
     try:
         selected = questionary.select(
-            "Select primary Ollama model",
+            f"Select primary {provider} model",
             choices=models,
             default=default_model,
         ).ask()
@@ -328,37 +391,159 @@ def _select_primary_model(models: list[str], current_model: str) -> str:
     return str(selected)
 
 
+def _ask_text(prompt: str, default: str) -> str:
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return default
+    try:
+        answer = questionary.text(prompt, default=default).ask()
+    except Exception:
+        return default
+    return str(answer or default).strip() or default
+
+
+def _ask_api_key_strategy(default_env: str) -> tuple[str, str | None]:
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return default_env, None
+
+    try:
+        selected = questionary.select(
+            "How should API credentials be configured?",
+            choices=["Use environment variable", "Store API key in config"],
+            default="Use environment variable",
+        ).ask()
+    except Exception:
+        return default_env, None
+
+    if selected == "Store API key in config":
+        try:
+            api_key = questionary.password("API key").ask()
+        except Exception:
+            api_key = None
+        return default_env, str(api_key or "").strip() or None
+
+    env_name = _ask_text("API key environment variable", default_env)
+    return env_name, None
+
+
 @app.command()
 def setup(force: bool = typer.Option(False, "--force", help="Overwrite existing config/prompts")) -> None:
     _print_banner()
     setup_storage(force=force)
     config = load_config()
     typer.echo("Created ~/.thistlebot structure")
+    current_provider = get_llm_provider(config)
+    provider = _select_provider(current_provider)
+    current_model = get_default_model(config)
 
-    base_url = _ollama_base_url_from_config(config)
-    typer.echo(f"Ollama base URL: {base_url}")
+    config.setdefault("llm", {})
+    config.setdefault("providers", {})
+    config.setdefault("ollama", {})
+    config["llm"]["provider"] = provider
 
-    reachable, models, error = _discover_ollama_models(base_url)
+    if provider == "ollama":
+        base_url = _ask_text("Ollama base URL", _ollama_base_url_from_config(config))
+        typer.echo(f"Ollama base URL: {base_url}")
+
+        reachable, models, error = _discover_ollama_models(base_url)
+        if not reachable:
+            typer.echo("Unable to reach Ollama at the configured endpoint.", err=True)
+            if error:
+                typer.echo(f"Connection error: {error}", err=True)
+            typer.echo(_no_models_found_message(), err=True)
+            return
+
+        typer.echo("Ollama is running.")
+        if not models:
+            typer.echo(_no_models_found_message(), err=True)
+            return
+
+        typer.echo(f"Discovered {len(models)} model(s):")
+        for model_name in models:
+            typer.echo(f"- {model_name}")
+
+        selected_model = _select_primary_model(models, current_model, "ollama")
+        config["llm"]["model"] = selected_model
+        config["providers"].setdefault("ollama", {})
+        config["providers"]["ollama"]["base_url"] = base_url
+        config["ollama"]["base_url"] = base_url
+        config["ollama"]["model"] = selected_model
+        write_config(config, force=True)
+        typer.echo(f"Primary model set to: {selected_model}")
+        return
+
+    if provider == "openrouter":
+        base_url = _ask_text("OpenRouter base URL", _openrouter_base_url_from_config(config))
+        provider_cfg = get_provider_config(config, "openrouter")
+        env_name, direct_key = _ask_api_key_strategy(str(provider_cfg.get("api_key_env", "OPENROUTER_API_KEY")))
+        provider_cfg["base_url"] = base_url
+        provider_cfg["api_key_env"] = env_name
+        provider_cfg["api_key"] = direct_key
+        provider_cfg.setdefault("app_name", "thistlebot")
+        provider_cfg.setdefault("site_url", None)
+        provider_cfg.setdefault("default_headers", {})
+        config["providers"]["openrouter"] = provider_cfg
+
+        headers = dict(provider_cfg.get("default_headers") or {})
+        app_name = provider_cfg.get("app_name")
+        site_url = provider_cfg.get("site_url")
+        if isinstance(app_name, str) and app_name.strip():
+            headers.setdefault("X-Title", app_name.strip())
+        if isinstance(site_url, str) and site_url.strip():
+            headers.setdefault("HTTP-Referer", site_url.strip())
+
+        api_key = resolve_api_key(provider_cfg, default_env_name="OPENROUTER_API_KEY")
+        reachable, models, error = _discover_openai_compatible_models(base_url, api_key, headers=headers)
+        if not reachable:
+            typer.echo("Unable to reach OpenRouter at the configured endpoint.", err=True)
+            if error:
+                typer.echo(f"Connection error: {error}", err=True)
+
+        selected_model = current_model
+        if models:
+            typer.echo(f"Discovered {len(models)} model(s):")
+            for model_name in models:
+                typer.echo(f"- {model_name}")
+            selected_model = _select_primary_model(models, current_model, "openrouter")
+        else:
+            typer.echo(_no_provider_models_found_message("openrouter", base_url), err=True)
+            selected_model = _ask_text("Primary OpenRouter model", current_model or "openai/gpt-4o-mini")
+
+        config["llm"]["model"] = selected_model
+        write_config(config, force=True)
+        typer.echo(f"Primary model set to: {selected_model}")
+        return
+
+    base_url = _ask_text("OpenAI-compatible base URL", _openai_compatible_base_url_from_config(config))
+    provider_cfg = get_provider_config(config, "openai_compatible")
+    env_name, direct_key = _ask_api_key_strategy(str(provider_cfg.get("api_key_env", "OPENAI_API_KEY")))
+    provider_cfg["base_url"] = base_url
+    provider_cfg["api_key_env"] = env_name
+    provider_cfg["api_key"] = direct_key
+    provider_cfg.setdefault("default_headers", {})
+    config["providers"]["openai_compatible"] = provider_cfg
+
+    api_key = resolve_api_key(provider_cfg, default_env_name="OPENAI_API_KEY")
+    headers = dict(provider_cfg.get("default_headers") or {})
+    reachable, models, error = _discover_openai_compatible_models(base_url, api_key, headers=headers)
     if not reachable:
-        typer.echo("Unable to reach Ollama at the configured endpoint.", err=True)
+        typer.echo("Unable to reach OpenAI-compatible endpoint.", err=True)
         if error:
             typer.echo(f"Connection error: {error}", err=True)
-        typer.echo(_no_models_found_message(), err=True)
-        return
 
-    typer.echo("Ollama is running.")
-    if not models:
-        typer.echo(_no_models_found_message(), err=True)
-        return
+    selected_model = current_model
+    if models:
+        typer.echo(f"Discovered {len(models)} model(s):")
+        for model_name in models:
+            typer.echo(f"- {model_name}")
+        selected_model = _select_primary_model(models, current_model, "openai_compatible")
+    else:
+        typer.echo(_no_provider_models_found_message("openai_compatible", base_url), err=True)
+        selected_model = _ask_text(
+            "Primary OpenAI-compatible model",
+            current_model or "meta-llama/Meta-Llama-3.1-8B-Instruct",
+        )
 
-    typer.echo(f"Discovered {len(models)} model(s):")
-    for model_name in models:
-        typer.echo(f"- {model_name}")
-
-    current_model = config.get("ollama", {}).get("model", "")
-    selected_model = _select_primary_model(models, current_model)
-    config.setdefault("ollama", {})
-    config["ollama"]["model"] = selected_model
+    config["llm"]["model"] = selected_model
     write_config(config, force=True)
     typer.echo(f"Primary model set to: {selected_model}")
 
@@ -400,9 +585,59 @@ def ollama_check() -> None:
     for model_name in models:
         typer.echo(f"- {model_name}")
 
-    configured_model = config.get("ollama", {}).get("model", "")
+    configured_model = get_default_model(config) if get_llm_provider(config) == "ollama" else config.get("ollama", {}).get("model", "")
     if configured_model:
         typer.echo(f"Configured primary model: {configured_model}")
+
+
+@llm_app.command("check")
+def llm_check() -> None:
+    _print_banner()
+    config = load_config()
+    provider = get_llm_provider(config)
+    model = get_default_model(config)
+    typer.echo(f"Provider: {provider}")
+    typer.echo(f"Configured primary model: {model}")
+
+    if provider == "ollama":
+        base_url = _ollama_base_url_from_config(config)
+        typer.echo(f"Endpoint: {base_url}")
+        reachable, models, error = _discover_ollama_models(base_url)
+    elif provider == "openrouter":
+        base_url = _openrouter_base_url_from_config(config)
+        cfg = get_provider_config(config, "openrouter")
+        api_key = resolve_api_key(cfg, default_env_name="OPENROUTER_API_KEY")
+        headers = dict(cfg.get("default_headers") or {})
+        app_name = cfg.get("app_name")
+        site_url = cfg.get("site_url")
+        if isinstance(app_name, str) and app_name.strip():
+            headers.setdefault("X-Title", app_name.strip())
+        if isinstance(site_url, str) and site_url.strip():
+            headers.setdefault("HTTP-Referer", site_url.strip())
+        typer.echo(f"Endpoint: {base_url}")
+        reachable, models, error = _discover_openai_compatible_models(base_url, api_key, headers=headers)
+    elif provider == "openai_compatible":
+        base_url = _openai_compatible_base_url_from_config(config)
+        cfg = get_provider_config(config, "openai_compatible")
+        api_key = resolve_api_key(cfg, default_env_name="OPENAI_API_KEY")
+        headers = dict(cfg.get("default_headers") or {})
+        typer.echo(f"Endpoint: {base_url}")
+        reachable, models, error = _discover_openai_compatible_models(base_url, api_key, headers=headers)
+    else:
+        typer.echo(f"Unknown provider: {provider}", err=True)
+        raise typer.Exit(code=1)
+
+    if not reachable:
+        typer.echo("Reachable: no")
+        if error:
+            typer.echo(f"Error: {error}", err=True)
+        raise typer.Exit(code=1)
+
+    typer.echo("Reachable: yes")
+    typer.echo(f"Models found: {len(models)}")
+    if models:
+        for model_name in models[:30]:
+            typer.echo(f"- {model_name}")
 
 
 @app.command()
@@ -435,7 +670,7 @@ def chat(
     config = load_config()
     gateway_url = _gateway_url_from_config(config)
     gateway_host, gateway_port = _gateway_host_port_from_config(config)
-    active_model = model or config.get("ollama", {}).get("model", "llama3")
+    active_model = model or get_default_model(config)
 
     try:
         with ensure_gateway(
@@ -531,7 +766,7 @@ def meeting(
     gateway_url = _gateway_url_from_config(config)
     gateway_host, gateway_port = _gateway_host_port_from_config(config)
 
-    active_model = config.get("ollama", {}).get("model", "llama3")
+    active_model = get_default_model(config)
     selected_model_a = model_a or active_model
     selected_model_b = model_b or active_model
 

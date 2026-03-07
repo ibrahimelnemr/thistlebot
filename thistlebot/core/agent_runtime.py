@@ -39,6 +39,7 @@ def run_tool_agent(
 
         for call in tool_calls:
             tool_name = _tool_name(call)
+            tool_call_id = str(call.get("id") or "")
             raw_args = _tool_args(call)
             args = normalize_tool_args(raw_args)
             events.append({"event": "tool_call", "tool": tool_name, "args": args})
@@ -58,6 +59,8 @@ def run_tool_agent(
             history.append(
                 {
                     "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "name": tool_name,
                     "tool_name": tool_name,
                     "content": json.dumps(payload),
                 }

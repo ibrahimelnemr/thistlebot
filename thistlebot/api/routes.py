@@ -11,6 +11,7 @@ from ..core.session import SessionStore
 from ..core.tools.registry import build_tool_registry
 from ..integrations.mcp.registry import MCPRegistry, build_mcp_registry
 from ..llm.base import BaseLLMClient
+from ..llm.factory import get_default_model
 
 
 EVENT_PREFIX = "[[THISTLEBOT_EVENT]]"
@@ -37,7 +38,7 @@ def build_router(client: BaseLLMClient, sessions: SessionStore, config: dict) ->
     def chat(payload: dict) -> dict:
         session_id = payload.get("session_id", "default")
         messages = payload.get("messages", [])
-        model = payload.get("model") or config.get("ollama", {}).get("model", "llama3")
+        model = payload.get("model") or get_default_model(config)
 
         if tool_loop_enabled and tool_registry.list_tool_names():
             content = run_tool_agent(
@@ -62,7 +63,7 @@ def build_router(client: BaseLLMClient, sessions: SessionStore, config: dict) ->
     def chat_stream(payload: dict) -> StreamingResponse:
         session_id = payload.get("session_id", "default")
         messages = payload.get("messages", [])
-        model = payload.get("model") or config.get("ollama", {}).get("model", "llama3")
+        model = payload.get("model") or get_default_model(config)
 
         def event_stream() -> Iterable[str]:
             user_content = messages[-1]["content"] if messages else ""
