@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import os
 from typing import Any
+
+import httpx
 
 from .connector import MCPConnector
 
@@ -75,22 +78,69 @@ class HttpMCPClient(MCPConnector):
         self.name = name
         self._config: dict[str, Any] = {}
         self._connected = False
+        self._last_error: str | None = None
+        self._last_tool_count: int | None = None
 
     def connect(self, config: dict) -> None:
         self._config = config
         self._connected = True
+        self._last_error = None
+        self._last_tool_count = None
 
     def list_tools(self) -> list[dict]:
-        raise RuntimeError("HTTP MCP transport is not implemented yet")
+        if not self._connected:
+            raise RuntimeError(f"MCP connector '{self.name}' is not connected")
+        return _run_async(self._list_tools_async())
 
     def invoke(self, tool_name: str, payload: dict) -> dict:
-        raise RuntimeError("HTTP MCP transport is not implemented yet")
+        if not self._connected:
+            raise RuntimeError(f"MCP connector '{self.name}' is not connected")
+        return _run_async(self._invoke_async(tool_name, payload))
 
     def status(self) -> dict:
-        return {"name": self.name, "connected": self._connected, "transport": "http"}
+        return {
+            "name": self.name,
+            "connected": self._connected,
+            "transport": "http",
+            "last_error": self._last_error,
+            "last_tool_count": self._last_tool_count,
+        }
 
     def close(self) -> None:
         self._connected = False
+
+    async def _list_tools_async(self) -> list[dict]:
+        try:
+            session = await _open_http_session(self._config)
+            async with session as client:
+                response = await client.list_tools()
+                tools = _extract_tools(response)
+                normalized = [
+                    {
+                        "name": _get_attr(tool, "name") or "",
+                        "description": _get_attr(tool, "description") or "MCP tool",
+                        "input_schema": _get_attr(tool, "inputSchema") or {"type": "object", "properties": {}},
+                    }
+                    for tool in tools
+                    if _get_attr(tool, "name")
+                ]
+                self._last_tool_count = len(normalized)
+                self._last_error = None
+                return normalized
+        except Exception as exc:
+            self._last_error = str(exc)
+            raise
+
+    async def _invoke_async(self, tool_name: str, payload: dict) -> dict:
+        try:
+            session = await _open_http_session(self._config)
+            async with session as client:
+                response = await client.call_tool(tool_name, payload)
+                self._last_error = None
+                return _normalize_call_result(response)
+        except Exception as exc:
+            self._last_error = str(exc)
+            raise
 
 
 async def _open_session(config: dict):
@@ -130,6 +180,65 @@ async def _open_session(config: dict):
             await stdio_ctx.__aexit__(exc_type, exc, tb)
 
     return _SessionWrapper()
+
+
+async def _open_http_session(config: dict):
+    try:
+        from mcp import ClientSession
+        from mcp.client.streamable_http import create_mcp_http_client, streamable_http_client
+    except Exception as exc:
+        raise RuntimeError("MCP streamable HTTP client not available. Upgrade package 'mcp'.") from exc
+
+    url = str(config.get("url") or "").strip()
+    if not url:
+        raise RuntimeError("Missing MCP HTTP server url")
+
+    timeout_seconds = float(config.get("timeout_seconds", 30.0))
+    headers: dict[str, str] = {}
+    token = _resolve_http_bearer_token(config)
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    http_client = create_mcp_http_client(
+        headers=headers or None,
+        timeout=httpx.Timeout(timeout_seconds),
+    )
+
+    stream_ctx = streamable_http_client(url, http_client=http_client)
+    read_stream, write_stream, _ = await stream_ctx.__aenter__()
+    session_ctx = ClientSession(read_stream, write_stream)
+    session = await session_ctx.__aenter__()
+    initialize = getattr(session, "initialize")
+    if inspect.iscoroutinefunction(initialize):
+        await initialize()
+    else:
+        maybe = initialize()
+        if inspect.isawaitable(maybe):
+            await maybe
+
+    class _SessionWrapper:
+        async def __aenter__(self):
+            return session
+
+        async def __aexit__(self, exc_type, exc, tb):
+            await session_ctx.__aexit__(exc_type, exc, tb)
+            await stream_ctx.__aexit__(exc_type, exc, tb)
+            await http_client.aclose()
+
+    return _SessionWrapper()
+
+
+def _resolve_http_bearer_token(config: dict) -> str | None:
+    auth_cfg = config.get("auth", {}) if isinstance(config.get("auth"), dict) else {}
+    explicit = auth_cfg.get("token")
+    if explicit:
+        return str(explicit)
+    env_name = auth_cfg.get("token_env")
+    if env_name:
+        value = os.getenv(str(env_name))
+        if value:
+            return value
+    return None
 
 
 def _run_async(coro):

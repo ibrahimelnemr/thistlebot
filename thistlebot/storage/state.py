@@ -42,6 +42,15 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "client_id": "Ov23likecnqtFvsVynK2",
         "token": None,
     },
+    "wordpress": {
+        "client_id": None,
+        "token": None,
+        "refresh_token": None,
+        "expires_at": None,
+        "redirect_uri": "http://127.0.0.1:8765/callback",
+        "scope": "auth",
+        "client_name": "Thistlebot WordPress MCP",
+    },
     "tools": {
         "runtime": {
             "enabled": True,
@@ -83,6 +92,17 @@ DEFAULT_CONFIG: dict[str, Any] = {
                 "args": ["-y", "@github/github-mcp-server"],
                 "env_from": {
                     "GITHUB_PERSONAL_ACCESS_TOKEN": "github.token",
+                },
+                "timeout_seconds": 30,
+            },
+            "wpcom-mcp": {
+                "enabled": False,
+                "transport": "http",
+                "url": "https://public-api.wordpress.com/wpcom/v2/mcp/v1",
+                "auth": {
+                    "type": "bearer",
+                    "token": None,
+                    "token_env": "WORDPRESS_ACCESS_TOKEN",
                 },
                 "timeout_seconds": 30,
             },
@@ -162,6 +182,32 @@ def normalize_config(config: dict[str, Any]) -> dict[str, Any]:
         "openai_compatible",
         dict(default_providers_cfg.get("openai_compatible", {})),
     )
+
+    wordpress_cfg = cfg.get("wordpress")
+    if not isinstance(wordpress_cfg, dict):
+        wordpress_cfg = {}
+    cfg["wordpress"] = wordpress_cfg
+    for key, value in dict(DEFAULT_CONFIG.get("wordpress", {})).items():
+        if key not in wordpress_cfg:
+            wordpress_cfg[key] = copy.deepcopy(value)
+
+    mcp_cfg = cfg.get("mcp")
+    if not isinstance(mcp_cfg, dict):
+        mcp_cfg = {}
+    cfg["mcp"] = mcp_cfg
+    default_mcp_cfg = dict(DEFAULT_CONFIG.get("mcp", {}))
+    if "enabled" not in mcp_cfg:
+        mcp_cfg["enabled"] = bool(default_mcp_cfg.get("enabled", False))
+
+    servers_cfg = mcp_cfg.get("servers")
+    if not isinstance(servers_cfg, dict):
+        servers_cfg = {}
+    mcp_cfg["servers"] = servers_cfg
+    default_servers_cfg = default_mcp_cfg.get("servers", {})
+    if isinstance(default_servers_cfg, dict):
+        for server_name, server_defaults in default_servers_cfg.items():
+            if server_name not in servers_cfg:
+                servers_cfg[server_name] = copy.deepcopy(server_defaults)
 
     return cfg
 

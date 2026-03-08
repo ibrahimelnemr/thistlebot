@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import sys
+import time
 import webbrowser
-from typing import Optional
+from typing import Any, Optional
 import json
 
 import httpx
@@ -18,6 +19,13 @@ from .core.meeting_graph import MeetingConfig, run_meeting_graph
 from .core.tools.registry import build_tool_registry
 from .integrations.github.oauth import login_with_device_flow, poll_for_token
 from .integrations.mcp.registry import build_mcp_registry
+from .integrations.wordpress.oauth import (
+    DEFAULT_REDIRECT_URI as WORDPRESS_DEFAULT_REDIRECT_URI,
+    login_with_authorization_code_flow,
+    refresh_access_token as wordpress_refresh_access_token,
+    register_client as wordpress_register_client,
+    token_expired as wordpress_token_expired,
+)
 from .llm.factory import get_default_model, get_llm_provider, get_provider_config, resolve_api_key
 from .llm.openai_compatible_client import OpenAICompatibleClient
 from .storage.state import load_config, reset_storage, setup_storage, write_config
@@ -27,10 +35,12 @@ github_app = typer.Typer(help="GitHub integrations")
 ollama_app = typer.Typer(help="Ollama diagnostics")
 llm_app = typer.Typer(help="LLM provider diagnostics")
 mcp_app = typer.Typer(help="MCP integrations")
+wordpress_app = typer.Typer(help="WordPress integrations")
 app.add_typer(github_app, name="github")
 app.add_typer(ollama_app, name="ollama")
 app.add_typer(llm_app, name="llm")
 app.add_typer(mcp_app, name="mcp")
+app.add_typer(wordpress_app, name="wordpress")
 
 RICH_CONSOLE = Console()
 THINK_OPEN_MARKERS = (
@@ -282,6 +292,153 @@ def _render_tool_event(event: dict) -> None:
 
     raw = json.dumps(event, ensure_ascii=False)
     typer.secho(f"[tool event] {raw}", fg="yellow")
+
+
+def _extract_text_from_tool_response(result: dict[str, Any]) -> str:
+    content = result.get("content")
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    parts: list[str] = []
+    for item in content:
+        if isinstance(item, dict):
+            text = item.get("text")
+        else:
+            text = getattr(item, "text", None)
+        if isinstance(text, str) and text.strip():
+            parts.append(text)
+    return "\n".join(parts)
+
+
+def _decode_json_text(text: str) -> Any:
+    raw = text.strip()
+    if not raw:
+        return None
+    candidates = [raw]
+    if raw.startswith("```") and raw.endswith("```"):
+        stripped = "\n".join(raw.splitlines()[1:-1]).strip()
+        candidates.append(stripped)
+    for candidate in candidates:
+        try:
+            return json.loads(candidate)
+        except Exception:
+            continue
+    return None
+
+
+def _collect_sites_like(value: Any) -> list[dict[str, Any]]:
+    found: list[dict[str, Any]] = []
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            for key, child in node.items():
+                lowered = str(key).lower()
+                if lowered in {"sites", "blogs"} and isinstance(child, list):
+                    for item in child:
+                        if isinstance(item, dict):
+                            found.append(item)
+                walk(child)
+            return
+        if isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(value)
+    return found
+
+
+def _extract_sites_from_result(result: dict[str, Any]) -> list[dict[str, Any]]:
+    structured = result.get("structuredContent")
+    if structured is not None:
+        sites = _collect_sites_like(structured)
+        if sites:
+            return sites
+
+    text = _extract_text_from_tool_response(result)
+    parsed = _decode_json_text(text)
+    if parsed is not None:
+        sites = _collect_sites_like(parsed)
+        if sites:
+            return sites
+    return []
+
+
+def _wordpress_mcp_connector(config: dict) -> Any:
+    registry = build_mcp_registry(config)
+    connector = registry.get("wpcom-mcp")
+    if connector is None:
+        raise RuntimeError("MCP server 'wpcom-mcp' is not configured or not enabled.")
+    return connector
+
+
+def _maybe_refresh_wordpress_token(config: dict) -> tuple[dict, bool]:
+    wp_cfg = config.get("wordpress", {})
+    if not isinstance(wp_cfg, dict):
+        return config, False
+    token = wp_cfg.get("token")
+    refresh_token = wp_cfg.get("refresh_token")
+    client_id = wp_cfg.get("client_id")
+    if not (isinstance(token, str) and token and isinstance(refresh_token, str) and isinstance(client_id, str)):
+        return config, False
+    if not wordpress_token_expired(wp_cfg):
+        return config, False
+
+    refreshed = wordpress_refresh_access_token(
+        client_id=client_id,
+        refresh_token=refresh_token,
+        timeout=30.0,
+    )
+    wp_cfg["token"] = refreshed.get("access_token")
+    wp_cfg["refresh_token"] = refreshed.get("refresh_token") or wp_cfg.get("refresh_token")
+    wp_cfg["token_type"] = refreshed.get("token_type")
+    wp_cfg["scope"] = refreshed.get("scope") or wp_cfg.get("scope")
+    wp_cfg["expires_in"] = refreshed.get("expires_in")
+    expires_in = refreshed.get("expires_in")
+    if isinstance(expires_in, (int, float)):
+        wp_cfg["expires_at"] = int(time.time() + int(expires_in))
+    config["wordpress"] = wp_cfg
+
+    mcp_cfg = config.get("mcp", {})
+    if isinstance(mcp_cfg, dict):
+        servers = mcp_cfg.get("servers", {})
+        if isinstance(servers, dict):
+            wp_server = servers.get("wpcom-mcp", {})
+            if isinstance(wp_server, dict):
+                auth_cfg = wp_server.get("auth", {})
+                if not isinstance(auth_cfg, dict):
+                    auth_cfg = {}
+                auth_cfg["token"] = wp_cfg.get("token")
+                wp_server["auth"] = auth_cfg
+                servers["wpcom-mcp"] = wp_server
+                mcp_cfg["servers"] = servers
+                config["mcp"] = mcp_cfg
+    return config, True
+
+
+def _site_identifier(site: dict[str, Any]) -> str:
+    for key in ("domain", "site_url", "URL", "url", "site_URL", "slug", "blogname", "name"):
+        value = site.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    site_id = site.get("ID")
+    if site_id is not None:
+        return str(site_id)
+    return ""
+
+
+def _build_content_authoring_execute_payload(site_ref: str, confirmation_text: str) -> dict[str, Any]:
+    return {
+        "wpcom_site": site_ref,
+        "action": "execute",
+        "operation": "posts.create",
+        "params": {
+            "title": "Test",
+            "content": "test",
+            "status": "draft",
+            "user_confirmed": confirmation_text,
+        },
+    }
 
 
 def _ollama_base_url_from_config(config: dict) -> str:
@@ -933,6 +1090,305 @@ def github_repos(
             typer.echo(name)
 
 
+@wordpress_app.command("login")
+def wordpress_login(
+    open_browser: bool = typer.Option(True, "--open/--no-open", help="Open authorization URL in browser"),
+    force_register: bool = typer.Option(False, "--force-register", help="Register a fresh OAuth client id"),
+    callback_timeout: int = typer.Option(240, "--callback-timeout", help="Seconds to wait for browser callback"),
+) -> None:
+    config = load_config()
+    wp_cfg = config.setdefault("wordpress", {})
+    if not isinstance(wp_cfg, dict):
+        wp_cfg = {}
+        config["wordpress"] = wp_cfg
+
+    redirect_uri = str(wp_cfg.get("redirect_uri") or WORDPRESS_DEFAULT_REDIRECT_URI)
+    scope = str(wp_cfg.get("scope") or "auth")
+    client_name = str(wp_cfg.get("client_name") or "Thistlebot WordPress MCP")
+    timeout = 30.0
+
+    client_id = wp_cfg.get("client_id")
+    if force_register or not client_id:
+        try:
+            registration = wordpress_register_client(client_name=client_name, redirect_uri=redirect_uri, timeout=timeout)
+        except Exception as exc:
+            typer.echo(f"WordPress client registration failed: {exc}", err=True)
+            raise typer.Exit(code=1)
+        client_id = str(registration.get("client_id") or "")
+        if not client_id:
+            typer.echo("WordPress client registration did not return client_id", err=True)
+            raise typer.Exit(code=1)
+        wp_cfg["client_id"] = client_id
+        wp_cfg["registration"] = registration
+
+    typer.echo("Starting WordPress OAuth login flow...")
+    try:
+        token_data, authorize_url = login_with_authorization_code_flow(
+            client_id=str(client_id),
+            redirect_uri=redirect_uri,
+            scope=scope,
+            timeout=timeout,
+            callback_timeout=callback_timeout,
+            open_browser=open_browser,
+        )
+    except Exception as exc:
+        typer.echo(f"WordPress login failed: {exc}", err=True)
+        raise typer.Exit(code=1)
+
+    if not open_browser:
+        typer.echo("Open this URL to authorize:")
+        typer.echo(authorize_url)
+
+    wp_cfg["token"] = token_data.get("access_token")
+    wp_cfg["refresh_token"] = token_data.get("refresh_token")
+    wp_cfg["token_type"] = token_data.get("token_type")
+    wp_cfg["scope"] = token_data.get("scope") or scope
+    wp_cfg["expires_in"] = token_data.get("expires_in")
+    wp_cfg["expires_at"] = token_data.get("expires_at")
+    wp_cfg["redirect_uri"] = redirect_uri
+    wp_cfg["client_name"] = client_name
+
+    mcp_cfg = config.setdefault("mcp", {})
+    if not isinstance(mcp_cfg, dict):
+        mcp_cfg = {}
+        config["mcp"] = mcp_cfg
+    mcp_cfg["enabled"] = True
+    servers = mcp_cfg.setdefault("servers", {})
+    if not isinstance(servers, dict):
+        servers = {}
+        mcp_cfg["servers"] = servers
+
+    server_cfg = servers.setdefault("wpcom-mcp", {})
+    if not isinstance(server_cfg, dict):
+        server_cfg = {}
+        servers["wpcom-mcp"] = server_cfg
+    server_cfg["enabled"] = True
+    server_cfg["transport"] = "http"
+    server_cfg["url"] = "https://public-api.wordpress.com/wpcom/v2/mcp/v1"
+    server_cfg["timeout_seconds"] = 30
+    auth_cfg = server_cfg.setdefault("auth", {})
+    if not isinstance(auth_cfg, dict):
+        auth_cfg = {}
+        server_cfg["auth"] = auth_cfg
+    auth_cfg["type"] = "bearer"
+    auth_cfg["token"] = wp_cfg.get("token")
+    auth_cfg["token_env"] = auth_cfg.get("token_env") or "WORDPRESS_ACCESS_TOKEN"
+
+    write_config(config, force=True)
+    typer.echo("WordPress token stored in ~/.thistlebot/config.json")
+    typer.echo("MCP server 'wpcom-mcp' enabled.")
+
+
+@wordpress_app.command("status")
+def wordpress_status() -> None:
+    config = load_config()
+    wp_cfg = config.get("wordpress", {})
+    if not isinstance(wp_cfg, dict):
+        wp_cfg = {}
+
+    token = wp_cfg.get("token")
+    refresh_token = wp_cfg.get("refresh_token")
+    client_id = wp_cfg.get("client_id")
+
+    typer.echo(f"WordPress client_id: {'present' if client_id else 'missing'}")
+    typer.echo(f"WordPress token: {'present' if token else 'missing'}")
+    typer.echo(f"WordPress refresh_token: {'present' if refresh_token else 'missing'}")
+
+    expires_at = wp_cfg.get("expires_at")
+    if token and isinstance(expires_at, (int, float)):
+        if wordpress_token_expired({"expires_at": expires_at}):
+            typer.echo("WordPress token state: expired")
+        else:
+            typer.echo("WordPress token state: active")
+
+    mcp_cfg = config.get("mcp", {})
+    servers = mcp_cfg.get("servers", {}) if isinstance(mcp_cfg, dict) else {}
+    wp_server = servers.get("wpcom-mcp", {}) if isinstance(servers, dict) else {}
+    enabled = bool(isinstance(wp_server, dict) and wp_server.get("enabled"))
+    typer.echo(f"MCP wpcom-mcp: {'enabled' if enabled else 'disabled'}")
+
+    if token and isinstance(wp_cfg.get("refresh_token"), str) and isinstance(client_id, str):
+        if wordpress_token_expired(wp_cfg):
+            try:
+                config, refreshed = _maybe_refresh_wordpress_token(config)
+                if not refreshed:
+                    return
+                write_config(config, force=True)
+                typer.echo("WordPress token auto-refreshed.")
+            except Exception as exc:
+                typer.echo(f"WordPress token refresh failed: {exc}")
+
+
+@wordpress_app.command("logout")
+def wordpress_logout(
+    yes: bool = typer.Option(False, "--yes", help="Skip confirmation prompt"),
+) -> None:
+    config = load_config()
+    if not yes and not typer.confirm("Clear stored WordPress token and disable wpcom-mcp?", default=True):
+        typer.echo("Aborted.")
+        return
+
+    wp_cfg = config.get("wordpress", {})
+    if not isinstance(wp_cfg, dict):
+        wp_cfg = {}
+    wp_cfg["token"] = None
+    wp_cfg["refresh_token"] = None
+    wp_cfg["expires_in"] = None
+    wp_cfg["expires_at"] = None
+    wp_cfg["token_type"] = None
+    config["wordpress"] = wp_cfg
+
+    mcp_cfg = config.get("mcp", {})
+    if not isinstance(mcp_cfg, dict):
+        mcp_cfg = {}
+    servers = mcp_cfg.get("servers", {})
+    if not isinstance(servers, dict):
+        servers = {}
+    wp_server = servers.get("wpcom-mcp", {})
+    if not isinstance(wp_server, dict):
+        wp_server = {}
+    wp_server["enabled"] = False
+    auth_cfg = wp_server.get("auth", {})
+    if not isinstance(auth_cfg, dict):
+        auth_cfg = {}
+    auth_cfg["token"] = None
+    wp_server["auth"] = auth_cfg
+    servers["wpcom-mcp"] = wp_server
+    mcp_cfg["servers"] = servers
+
+    if not any(bool(isinstance(v, dict) and v.get("enabled")) for v in servers.values()):
+        mcp_cfg["enabled"] = False
+
+    config["mcp"] = mcp_cfg
+    write_config(config, force=True)
+    typer.echo("WordPress credentials cleared and wpcom-mcp disabled.")
+
+
+@wordpress_app.command("sites")
+def wordpress_sites() -> None:
+    config = load_config()
+    try:
+        config, refreshed = _maybe_refresh_wordpress_token(config)
+        if refreshed:
+            write_config(config, force=True)
+    except Exception as exc:
+        typer.echo(f"WordPress token refresh failed: {exc}", err=True)
+        raise typer.Exit(code=1)
+
+    try:
+        connector = _wordpress_mcp_connector(config)
+        result = connector.invoke("wpcom-mcp-user-sites", {})
+    except Exception as exc:
+        typer.echo(f"WordPress sites lookup failed: {exc}", err=True)
+        raise typer.Exit(code=1)
+
+    sites = _extract_sites_from_result(result)
+    if not sites:
+        text = _extract_text_from_tool_response(result).strip()
+        typer.echo("No site/blog data parsed from tool output.")
+        if text:
+            typer.echo(text)
+        return
+
+    for site in sites:
+        label = site.get("blogname") or site.get("name") or site.get("title") or "(unnamed)"
+        domain = site.get("domain")
+        url = site.get("site_url") or site.get("URL") or site.get("url") or site.get("site_URL")
+        row = str(label)
+        if isinstance(domain, str) and domain:
+            row += f" domain={domain}"
+        if isinstance(url, str) and url:
+            row += f" url={url}"
+        typer.echo(row)
+
+
+@wordpress_app.command("test")
+def wordpress_test(
+    site: Optional[str] = typer.Option(None, "--site", help="Target site/domain to publish test post"),
+    yes: bool = typer.Option(False, "--yes", help="Skip confirmation prompt and publish test post"),
+) -> None:
+    config = load_config()
+    try:
+        config, refreshed = _maybe_refresh_wordpress_token(config)
+        if refreshed:
+            write_config(config, force=True)
+    except Exception as exc:
+        typer.echo(f"WordPress token refresh failed: {exc}", err=True)
+        raise typer.Exit(code=1)
+
+    try:
+        connector = _wordpress_mcp_connector(config)
+        sites_result = connector.invoke("wpcom-mcp-user-sites", {})
+    except Exception as exc:
+        typer.echo(f"WordPress site discovery failed: {exc}", err=True)
+        raise typer.Exit(code=1)
+
+    sites = _extract_sites_from_result(sites_result)
+    if not sites:
+        typer.echo("Unable to parse available sites from WordPress MCP response.", err=True)
+        raise typer.Exit(code=1)
+
+    typer.echo("Available blogs/sites:")
+    for idx, item in enumerate(sites, start=1):
+        label = item.get("blogname") or item.get("name") or item.get("title") or "(unnamed)"
+        ref = _site_identifier(item)
+        typer.echo(f"{idx}. {label} ({ref})")
+
+    site_ref = ""
+    if site:
+        site_ref = site
+    else:
+        if sys.stdin.isatty() and sys.stdout.isatty():
+            choices: list[questionary.Choice] = []
+            for item in sites:
+                label = item.get("blogname") or item.get("name") or item.get("title") or "(unnamed)"
+                ref = _site_identifier(item)
+                if not ref:
+                    continue
+                choices.append(questionary.Choice(title=f"{label} ({ref})", value=ref))
+            if choices:
+                selected = questionary.select("Select site for test post", choices=choices).ask()
+                if isinstance(selected, str) and selected:
+                    site_ref = selected
+        if not site_ref:
+            site_ref = _site_identifier(sites[0])
+
+    if not site_ref:
+        typer.echo("Could not determine a valid site identifier.", err=True)
+        raise typer.Exit(code=1)
+
+    if not yes and not typer.confirm(f"Publish a test draft post to '{site_ref}'?", default=False):
+        typer.echo("Cancelled. No post created.")
+        return
+
+    try:
+        tools = connector.list_tools()
+    except Exception as exc:
+        typer.echo(f"Unable to list WordPress tools: {exc}", err=True)
+        raise typer.Exit(code=1)
+
+    content_tool = next((tool for tool in tools if str(tool.get("name")) == "wpcom-mcp-content-authoring"), None)
+    if not content_tool:
+        typer.echo("Tool 'wpcom-mcp-content-authoring' not available for this account/role.", err=True)
+        raise typer.Exit(code=1)
+
+    confirmation_text = "yes" if yes else "user confirmed in cli"
+    payload = _build_content_authoring_execute_payload(site_ref, confirmation_text)
+
+    try:
+        result = connector.invoke("wpcom-mcp-content-authoring", payload)
+    except Exception as exc:
+        typer.echo(f"Test post creation failed: {exc}", err=True)
+        raise typer.Exit(code=1)
+
+    typer.echo("Test publish call completed.")
+    text = _extract_text_from_tool_response(result).strip()
+    if text:
+        typer.echo(text)
+    else:
+        typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
+
+
 @mcp_app.command("status")
 def mcp_status() -> None:
     config = load_config()
@@ -952,7 +1408,10 @@ def mcp_status() -> None:
         connected = "yes" if status.get("connected") else "no"
         transport = status.get("transport", "stdio")
         last_error = status.get("last_error")
+        last_tool_count = status.get("last_tool_count")
         typer.echo(f"{name}: connected={connected} transport={transport}")
+        if isinstance(last_tool_count, int):
+            typer.echo(f"  tool_count={last_tool_count}")
         if last_error:
             typer.echo(f"  last_error={last_error}")
 
