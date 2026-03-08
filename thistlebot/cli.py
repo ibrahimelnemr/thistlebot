@@ -1334,7 +1334,7 @@ def mcp_enable_open_web_search() -> None:
             "transport": "stdio",
             "command": "npx",
             "args": ["-y", "open-websearch@latest"],
-            "env": {"MODE": "stdio"},
+            "env": {"MODE": "stdio", "DEFAULT_SEARCH_ENGINE": "duckduckgo"},
             "timeout_seconds": 30,
         }
         servers_cfg["open-web-search"] = open_web_search_cfg
@@ -1343,7 +1343,13 @@ def mcp_enable_open_web_search() -> None:
     open_web_search_cfg.setdefault("transport", "stdio")
     open_web_search_cfg.setdefault("command", "npx")
     open_web_search_cfg.setdefault("args", ["-y", "open-websearch@latest"])
-    open_web_search_cfg.setdefault("env", {"MODE": "stdio"})
+    open_web_search_cfg.setdefault("env", {"MODE": "stdio", "DEFAULT_SEARCH_ENGINE": "duckduckgo"})
+    env_cfg = open_web_search_cfg.get("env")
+    if not isinstance(env_cfg, dict):
+        env_cfg = {}
+        open_web_search_cfg["env"] = env_cfg
+    env_cfg.setdefault("MODE", "stdio")
+    env_cfg.setdefault("DEFAULT_SEARCH_ENGINE", "duckduckgo")
     open_web_search_cfg.setdefault("timeout_seconds", 30)
 
     write_config(config, force=True)
@@ -1451,6 +1457,50 @@ def blogger_config_show() -> None:
 
     cfg = load_blogger_config()
     RICH_CONSOLE.print_json(json.dumps(cfg, indent=2))
+
+
+@blogger_app.command("retry-publish")
+def blogger_retry_publish(
+    run_id: Optional[str] = typer.Option(None, "--run-id", help="Run directory id to retry (defaults to latest)"),
+    status: Optional[str] = typer.Option(None, "--status", help="WordPress post status override (draft/publish)"),
+) -> None:
+    """Retry only the publish step for an existing run using saved draft artifacts."""
+    from .agents.blogger.workflow import retry_publish_from_run
+
+    console = RICH_CONSOLE
+
+    def _on_step(step_name: str, step_status: str) -> None:
+        if step_status == "started":
+            console.print(f"[cyan]>> Step: {step_name}...[/cyan]")
+        elif step_status == "completed":
+            console.print(f"[green]   {step_name} completed.[/green]")
+
+    console.print("[bold]Blogger agent — retry publish[/bold]")
+    if run_id:
+        console.print(f"  Run id: {run_id}")
+
+    try:
+        result = retry_publish_from_run(
+            run_id=run_id,
+            status_override=status,
+            on_step=_on_step,
+        )
+    except Exception as exc:
+        console.print(f"[red]Retry publish failed: {exc}[/red]")
+        raise typer.Exit(code=1)
+
+    console.print()
+    console.print("[bold green]Retry publish completed![/bold green]")
+    console.print(f"  Run dir: {result['run_dir']}")
+    console.print(f"  Status:  {result['post_status']}")
+
+    from pathlib import Path
+
+    final_path = Path(result["run_dir"]) / "final.md"
+    if final_path.exists():
+        console.print()
+        console.print("[bold]Publish summary:[/bold]")
+        console.print(final_path.read_text(encoding="utf-8")[:2000])
 
 
 if __name__ == "__main__":

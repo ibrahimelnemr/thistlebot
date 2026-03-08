@@ -103,6 +103,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
                 "args": ["-y", "open-websearch@latest"],
                 "env": {
                     "MODE": "stdio",
+                    "DEFAULT_SEARCH_ENGINE": "duckduckgo",
                 },
                 "timeout_seconds": 30,
             },

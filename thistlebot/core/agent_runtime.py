@@ -62,7 +62,7 @@ def run_tool_agent(
                     "tool_call_id": tool_call_id,
                     "name": tool_name,
                     "tool_name": tool_name,
-                    "content": json.dumps(payload),
+                    "content": json.dumps(payload, default=str),
                 }
             )
 

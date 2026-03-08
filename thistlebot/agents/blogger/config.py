@@ -26,7 +26,11 @@ DEFAULT_BLOGGER_CONFIG: dict[str, Any] = {
     "workflow": {
         "research_max_iterations": 12,
         "draft_max_iterations": 10,
+        "edit_max_iterations": 8,
+        "verify_max_iterations": 6,
         "publish_max_iterations": 8,
+        "max_revisions": 2,
+        "verify_pass_token": "VERDICT: PASS",
     },
 }
 
@@ -108,3 +112,31 @@ def list_runs() -> list[Path]:
     dirs = [d for d in runs_dir.iterdir() if d.is_dir()]
     dirs.sort(reverse=True)
     return dirs
+
+
+def find_resumable_run() -> Path | None:
+    """Return the newest run with an active run_state.json status."""
+    for run_dir in list_runs():
+        state_path = run_dir / "run_state.json"
+        if not state_path.exists():
+            continue
+        try:
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if isinstance(state, dict) and state.get("status") == "running":
+            return run_dir
+    return None
+
+
+def get_run_dir(run_id: str | None = None) -> Path | None:
+    """Return run directory by id or latest when id is omitted."""
+    runs = list_runs()
+    if not runs:
+        return None
+    if run_id is None:
+        return runs[0]
+    for run_dir in runs:
+        if run_dir.name == run_id:
+            return run_dir
+    return None
