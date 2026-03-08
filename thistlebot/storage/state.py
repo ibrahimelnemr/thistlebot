@@ -42,7 +42,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "client_id": "Ov23likecnqtFvsVynK2",
         "token": None,
     },
-    "wordpress": {
+    "wordpress_mcp": {
         "client_id": None,
         "token": None,
         "refresh_token": None,
@@ -50,6 +50,16 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "redirect_uri": "http://127.0.0.1:8765/callback",
         "scope": "auth",
         "client_name": "Thistlebot WordPress MCP",
+    },
+    "wordpress_rest": {
+        "enabled": False,
+        "client_id": None,
+        "client_secret": None,
+        "token": None,
+        "expires_at": None,
+        "redirect_uri": "http://127.0.0.1:8766/callback",
+        "scope": "posts",
+        "blog": None,
     },
     "tools": {
         "runtime": {
@@ -183,13 +193,31 @@ def normalize_config(config: dict[str, Any]) -> dict[str, Any]:
         dict(default_providers_cfg.get("openai_compatible", {})),
     )
 
-    wordpress_cfg = cfg.get("wordpress")
-    if not isinstance(wordpress_cfg, dict):
-        wordpress_cfg = {}
-    cfg["wordpress"] = wordpress_cfg
-    for key, value in dict(DEFAULT_CONFIG.get("wordpress", {})).items():
-        if key not in wordpress_cfg:
-            wordpress_cfg[key] = copy.deepcopy(value)
+    legacy_wordpress_cfg = cfg.get("wordpress")
+    if not isinstance(legacy_wordpress_cfg, dict):
+        legacy_wordpress_cfg = {}
+
+    wordpress_mcp_cfg = cfg.get("wordpress_mcp")
+    if not isinstance(wordpress_mcp_cfg, dict):
+        wordpress_mcp_cfg = {}
+    if legacy_wordpress_cfg:
+        for key, value in legacy_wordpress_cfg.items():
+            wordpress_mcp_cfg.setdefault(key, value)
+    cfg["wordpress_mcp"] = wordpress_mcp_cfg
+    for key, value in dict(DEFAULT_CONFIG.get("wordpress_mcp", {})).items():
+        if key not in wordpress_mcp_cfg:
+            wordpress_mcp_cfg[key] = copy.deepcopy(value)
+
+    wordpress_rest_cfg = cfg.get("wordpress_rest")
+    if not isinstance(wordpress_rest_cfg, dict):
+        wordpress_rest_cfg = {}
+    cfg["wordpress_rest"] = wordpress_rest_cfg
+    for key, value in dict(DEFAULT_CONFIG.get("wordpress_rest", {})).items():
+        if key not in wordpress_rest_cfg:
+            wordpress_rest_cfg[key] = copy.deepcopy(value)
+
+    # Keep legacy key for backward compatibility with older code paths and configs.
+    cfg["wordpress"] = wordpress_mcp_cfg
 
     mcp_cfg = cfg.get("mcp")
     if not isinstance(mcp_cfg, dict):

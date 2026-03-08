@@ -5,6 +5,7 @@ import time
 import webbrowser
 from typing import Any, Optional
 import json
+import urllib.parse
 
 import httpx
 import questionary
@@ -26,6 +27,12 @@ from .integrations.wordpress.oauth import (
     register_client as wordpress_register_client,
     token_expired as wordpress_token_expired,
 )
+from .integrations.wordpress.rest_client import WordPressRestClient
+from .integrations.wordpress.rest_oauth import (
+    DEFAULT_REDIRECT_URI as WORDPRESS_REST_DEFAULT_REDIRECT_URI,
+    login_with_authorization_code_flow as wordpress_rest_login_flow,
+    token_expired as wordpress_rest_token_expired,
+)
 from .llm.factory import get_default_model, get_llm_provider, get_provider_config, resolve_api_key
 from .llm.openai_compatible_client import OpenAICompatibleClient
 from .storage.state import load_config, reset_storage, setup_storage, write_config
@@ -35,12 +42,14 @@ github_app = typer.Typer(help="GitHub integrations")
 ollama_app = typer.Typer(help="Ollama diagnostics")
 llm_app = typer.Typer(help="LLM provider diagnostics")
 mcp_app = typer.Typer(help="MCP integrations")
-wordpress_app = typer.Typer(help="WordPress integrations")
+wordpress_mcp_app = typer.Typer(help="WordPress MCP integrations")
+wordpress_rest_app = typer.Typer(help="WordPress REST integrations")
 app.add_typer(github_app, name="github")
 app.add_typer(ollama_app, name="ollama")
 app.add_typer(llm_app, name="llm")
 app.add_typer(mcp_app, name="mcp")
-app.add_typer(wordpress_app, name="wordpress")
+app.add_typer(wordpress_mcp_app, name="wordpress-mcp")
+app.add_typer(wordpress_rest_app, name="wordpress-rest")
 
 RICH_CONSOLE = Console()
 THINK_OPEN_MARKERS = (
@@ -373,7 +382,7 @@ def _wordpress_mcp_connector(config: dict) -> Any:
 
 
 def _maybe_refresh_wordpress_token(config: dict) -> tuple[dict, bool]:
-    wp_cfg = config.get("wordpress", {})
+    wp_cfg = config.get("wordpress_mcp", {})
     if not isinstance(wp_cfg, dict):
         return config, False
     token = wp_cfg.get("token")
@@ -397,6 +406,7 @@ def _maybe_refresh_wordpress_token(config: dict) -> tuple[dict, bool]:
     expires_in = refreshed.get("expires_in")
     if isinstance(expires_in, (int, float)):
         wp_cfg["expires_at"] = int(time.time() + int(expires_in))
+    config["wordpress_mcp"] = wp_cfg
     config["wordpress"] = wp_cfg
 
     mcp_cfg = config.get("mcp", {})
@@ -414,6 +424,41 @@ def _maybe_refresh_wordpress_token(config: dict) -> tuple[dict, bool]:
                 mcp_cfg["servers"] = servers
                 config["mcp"] = mcp_cfg
     return config, True
+
+
+def _wordpress_rest_config(config: dict) -> dict[str, Any]:
+    cfg = config.get("wordpress_rest", {})
+    if isinstance(cfg, dict):
+        return cfg
+    return {}
+
+
+def _wordpress_rest_client(config: dict) -> WordPressRestClient:
+    rest_cfg = _wordpress_rest_config(config)
+    token = rest_cfg.get("token")
+    if not isinstance(token, str) or not token:
+        raise RuntimeError("WordPress REST token missing. Run 'thistlebot wordpress-rest login'.")
+    timeout = rest_cfg.get("timeout_seconds")
+    timeout_value = float(timeout) if isinstance(timeout, (int, float)) else 30.0
+    return WordPressRestClient(access_token=token, timeout_seconds=timeout_value)
+
+
+def _wordpress_rest_site_ref(config: dict, explicit_site: str | None) -> str:
+    if explicit_site:
+        return explicit_site
+    rest_cfg = _wordpress_rest_config(config)
+    blog = rest_cfg.get("blog")
+    if isinstance(blog, str) and blog.strip():
+        return blog.strip()
+    blog_url = rest_cfg.get("blog_url")
+    if isinstance(blog_url, str) and blog_url.strip():
+        return blog_url.strip()
+    blog_id = rest_cfg.get("blog_id")
+    if isinstance(blog_id, (int, float)):
+        return str(int(blog_id))
+    if isinstance(blog_id, str) and blog_id.strip():
+        return blog_id.strip()
+    raise RuntimeError("Missing site/blog reference. Provide --site or set wordpress_rest.blog in config.")
 
 
 def _site_identifier(site: dict[str, Any]) -> str:
@@ -1090,17 +1135,17 @@ def github_repos(
             typer.echo(name)
 
 
-@wordpress_app.command("login")
+@wordpress_mcp_app.command("login")
 def wordpress_login(
     open_browser: bool = typer.Option(True, "--open/--no-open", help="Open authorization URL in browser"),
     force_register: bool = typer.Option(False, "--force-register", help="Register a fresh OAuth client id"),
     callback_timeout: int = typer.Option(240, "--callback-timeout", help="Seconds to wait for browser callback"),
 ) -> None:
     config = load_config()
-    wp_cfg = config.setdefault("wordpress", {})
+    wp_cfg = config.setdefault("wordpress_mcp", {})
     if not isinstance(wp_cfg, dict):
         wp_cfg = {}
-        config["wordpress"] = wp_cfg
+        config["wordpress_mcp"] = wp_cfg
 
     redirect_uri = str(wp_cfg.get("redirect_uri") or WORDPRESS_DEFAULT_REDIRECT_URI)
     scope = str(wp_cfg.get("scope") or "auth")
@@ -1174,15 +1219,16 @@ def wordpress_login(
     auth_cfg["token"] = wp_cfg.get("token")
     auth_cfg["token_env"] = auth_cfg.get("token_env") or "WORDPRESS_ACCESS_TOKEN"
 
+    config["wordpress"] = wp_cfg
     write_config(config, force=True)
     typer.echo("WordPress token stored in ~/.thistlebot/config.json")
     typer.echo("MCP server 'wpcom-mcp' enabled.")
 
 
-@wordpress_app.command("status")
+@wordpress_mcp_app.command("status")
 def wordpress_status() -> None:
     config = load_config()
-    wp_cfg = config.get("wordpress", {})
+    wp_cfg = config.get("wordpress_mcp", {})
     if not isinstance(wp_cfg, dict):
         wp_cfg = {}
 
@@ -1219,7 +1265,7 @@ def wordpress_status() -> None:
                 typer.echo(f"WordPress token refresh failed: {exc}")
 
 
-@wordpress_app.command("logout")
+@wordpress_mcp_app.command("logout")
 def wordpress_logout(
     yes: bool = typer.Option(False, "--yes", help="Skip confirmation prompt"),
 ) -> None:
@@ -1228,7 +1274,7 @@ def wordpress_logout(
         typer.echo("Aborted.")
         return
 
-    wp_cfg = config.get("wordpress", {})
+    wp_cfg = config.get("wordpress_mcp", {})
     if not isinstance(wp_cfg, dict):
         wp_cfg = {}
     wp_cfg["token"] = None
@@ -1236,6 +1282,7 @@ def wordpress_logout(
     wp_cfg["expires_in"] = None
     wp_cfg["expires_at"] = None
     wp_cfg["token_type"] = None
+    config["wordpress_mcp"] = wp_cfg
     config["wordpress"] = wp_cfg
 
     mcp_cfg = config.get("mcp", {})
@@ -1264,7 +1311,7 @@ def wordpress_logout(
     typer.echo("WordPress credentials cleared and wpcom-mcp disabled.")
 
 
-@wordpress_app.command("sites")
+@wordpress_mcp_app.command("sites")
 def wordpress_sites() -> None:
     config = load_config()
     try:
@@ -1302,7 +1349,7 @@ def wordpress_sites() -> None:
         typer.echo(row)
 
 
-@wordpress_app.command("test")
+@wordpress_mcp_app.command("test")
 def wordpress_test(
     site: Optional[str] = typer.Option(None, "--site", help="Target site/domain to publish test post"),
     yes: bool = typer.Option(False, "--yes", help="Skip confirmation prompt and publish test post"),
@@ -1387,6 +1434,201 @@ def wordpress_test(
         typer.echo(text)
     else:
         typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+@wordpress_rest_app.command("login")
+def wordpress_rest_login(
+    client_id: str = typer.Option("", "--client-id", help="WordPress.com OAuth app client_id"),
+    client_secret: str = typer.Option("", "--client-secret", help="WordPress.com OAuth app client_secret"),
+    scope: str = typer.Option("posts", "--scope", help="OAuth scope(s), e.g. 'posts media'"),
+    blog: str = typer.Option("", "--blog", help="Optional site domain/id for single-site token"),
+    open_browser: bool = typer.Option(True, "--open/--no-open", help="Open authorization URL in browser"),
+    callback_timeout: int = typer.Option(240, "--callback-timeout", help="Seconds to wait for browser callback"),
+) -> None:
+    config = load_config()
+    rest_cfg = config.setdefault("wordpress_rest", {})
+    if not isinstance(rest_cfg, dict):
+        rest_cfg = {}
+        config["wordpress_rest"] = rest_cfg
+
+    configured_client_id = client_id.strip() or str(rest_cfg.get("client_id") or "")
+    configured_client_secret = client_secret.strip() or str(rest_cfg.get("client_secret") or "")
+    if not configured_client_id or not configured_client_secret:
+        typer.echo("WordPress REST login requires --client-id and --client-secret (or stored values).", err=True)
+        raise typer.Exit(code=1)
+
+    redirect_uri = str(rest_cfg.get("redirect_uri") or WORDPRESS_REST_DEFAULT_REDIRECT_URI)
+    selected_blog = blog.strip() or str(rest_cfg.get("blog") or "")
+
+    typer.echo("Starting WordPress REST OAuth login flow...")
+    try:
+        token_data, authorize_url = wordpress_rest_login_flow(
+            client_id=configured_client_id,
+            client_secret=configured_client_secret,
+            redirect_uri=redirect_uri,
+            scope=scope,
+            timeout=30.0,
+            callback_timeout=callback_timeout,
+            open_browser=open_browser,
+            blog=selected_blog or None,
+        )
+    except Exception as exc:
+        typer.echo(f"WordPress REST login failed: {exc}", err=True)
+        raise typer.Exit(code=1)
+
+    if not open_browser:
+        typer.echo("Open this URL to authorize:")
+        typer.echo(authorize_url)
+
+    rest_cfg["enabled"] = True
+    rest_cfg["client_id"] = configured_client_id
+    rest_cfg["client_secret"] = configured_client_secret
+    rest_cfg["redirect_uri"] = redirect_uri
+    rest_cfg["scope"] = token_data.get("scope") or scope
+    rest_cfg["blog"] = selected_blog or None
+    rest_cfg["blog_id"] = token_data.get("blog_id")
+    rest_cfg["blog_url"] = token_data.get("blog_url")
+    rest_cfg["token"] = token_data.get("access_token")
+    rest_cfg["token_type"] = token_data.get("token_type")
+    rest_cfg["expires_in"] = token_data.get("expires_in")
+    rest_cfg["expires_at"] = token_data.get("expires_at")
+
+    config["wordpress_rest"] = rest_cfg
+    write_config(config, force=True)
+    typer.echo("WordPress REST token stored in ~/.thistlebot/config.json")
+
+
+@wordpress_rest_app.command("status")
+def wordpress_rest_status() -> None:
+    config = load_config()
+    rest_cfg = _wordpress_rest_config(config)
+
+    enabled = bool(rest_cfg.get("enabled"))
+    token = rest_cfg.get("token")
+    client_id = rest_cfg.get("client_id")
+    client_secret = rest_cfg.get("client_secret")
+
+    typer.echo(f"WordPress REST enabled: {'yes' if enabled else 'no'}")
+    typer.echo(f"WordPress REST client_id: {'present' if client_id else 'missing'}")
+    typer.echo(f"WordPress REST client_secret: {'present' if client_secret else 'missing'}")
+    typer.echo(f"WordPress REST token: {'present' if token else 'missing'}")
+
+    expires_at = rest_cfg.get("expires_at")
+    if token and isinstance(expires_at, (int, float)):
+        state = "expired" if wordpress_rest_token_expired(rest_cfg) else "active"
+        typer.echo(f"WordPress REST token state: {state}")
+
+
+@wordpress_rest_app.command("sites")
+def wordpress_rest_sites() -> None:
+    config = load_config()
+    rest_cfg = _wordpress_rest_config(config)
+    try:
+        client = _wordpress_rest_client(config)
+        try:
+            result = client.list_sites()
+        except Exception:
+            # Some tokens are single-blog scoped and cannot call /me/sites.
+            client_id = rest_cfg.get("client_id")
+            if not isinstance(client_id, str) or not client_id:
+                raise
+            info = client.token_info(client_id)
+            blog_id = info.get("blog_id")
+            blog_ref = str(blog_id) if blog_id is not None else ""
+            if not blog_ref:
+                raise
+            site = client.get_site(blog_ref)
+            result = {"sites": [site], "token_scope": info.get("scope"), "single_blog_token": True}
+    except Exception as exc:
+        typer.echo(f"WordPress REST sites lookup failed: {exc}", err=True)
+        raise typer.Exit(code=1)
+
+    sites = result.get("sites") if isinstance(result, dict) else None
+    if not isinstance(sites, list) or not sites:
+        typer.echo("No sites returned.")
+        typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+
+    first_site = sites[0] if sites else None
+    if isinstance(first_site, dict):
+        site_id = first_site.get("ID")
+        site_url = first_site.get("URL") or first_site.get("url")
+        if site_id is not None:
+            rest_cfg["blog_id"] = site_id
+        if isinstance(site_url, str) and site_url:
+            rest_cfg["blog_url"] = site_url
+            if not rest_cfg.get("blog"):
+                parsed = urllib.parse.urlparse(site_url)
+                if parsed.netloc:
+                    rest_cfg["blog"] = parsed.netloc
+                else:
+                    rest_cfg["blog"] = site_url
+        config["wordpress_rest"] = rest_cfg
+        write_config(config, force=True)
+
+    for item in sites:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name") or item.get("title") or item.get("URL") or "(unnamed)"
+        url = item.get("URL") or item.get("url") or item.get("domain") or ""
+        site_id = item.get("ID")
+        row = str(name)
+        if url:
+            row += f" url={url}"
+        if site_id is not None:
+            row += f" id={site_id}"
+        typer.echo(row)
+
+
+@wordpress_rest_app.command("create-post")
+def wordpress_rest_create_post(
+    title: str = typer.Option(..., "--title", help="Post title"),
+    content: str = typer.Option(..., "--content", help="Post content"),
+    site: Optional[str] = typer.Option(None, "--site", help="Target site domain or site ID"),
+    status: str = typer.Option("draft", "--status", help="Post status: draft|publish|pending|future|private"),
+) -> None:
+    config = load_config()
+    try:
+        site_ref = _wordpress_rest_site_ref(config, site)
+        client = _wordpress_rest_client(config)
+        result = client.create_post(site_ref, title=title, content=content, status=status)
+    except Exception as exc:
+        typer.echo(f"WordPress REST create post failed: {exc}", err=True)
+        raise typer.Exit(code=1)
+
+    post_id = result.get("ID") if isinstance(result, dict) else None
+    post_url = result.get("URL") if isinstance(result, dict) else None
+    typer.echo(f"WordPress REST post created on '{site_ref}'.")
+    if post_id is not None:
+        typer.echo(f"Post ID: {post_id}")
+    if isinstance(post_url, str) and post_url:
+        typer.echo(f"Post URL: {post_url}")
+
+
+@wordpress_rest_app.command("test")
+def wordpress_rest_test(
+    site: Optional[str] = typer.Option(None, "--site", help="Target site domain or site ID"),
+    yes: bool = typer.Option(False, "--yes", help="Skip confirmation prompt and create test post"),
+) -> None:
+    config = load_config()
+    try:
+        site_ref = _wordpress_rest_site_ref(config, site)
+        if not yes and not typer.confirm(f"Create a REST test draft post on '{site_ref}'?", default=False):
+            typer.echo("Cancelled. No post created.")
+            return
+        client = _wordpress_rest_client(config)
+        result = client.create_post(site_ref, title="Test", content="test", status="draft")
+    except Exception as exc:
+        typer.echo(f"WordPress REST test failed: {exc}", err=True)
+        raise typer.Exit(code=1)
+
+    typer.echo("WordPress REST test post created successfully.")
+    post_id = result.get("ID") if isinstance(result, dict) else None
+    post_url = result.get("URL") if isinstance(result, dict) else None
+    if post_id is not None:
+        typer.echo(f"Post ID: {post_id}")
+    if isinstance(post_url, str) and post_url:
+        typer.echo(f"Post URL: {post_url}")
 
 
 @mcp_app.command("status")

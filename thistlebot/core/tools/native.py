@@ -4,13 +4,15 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from ...integrations.wordpress.rest_client import WordPressRestClient
 from .base import ToolResult
 from .policy import ToolPolicy
 
 
 class NativeTools:
-    def __init__(self, policy: ToolPolicy) -> None:
+    def __init__(self, policy: ToolPolicy, config: dict[str, Any] | None = None) -> None:
         self.policy = policy
+        self.config = config or {}
 
     def list_dir(self, payload: dict[str, Any]) -> ToolResult:
         target = str(payload.get("path") or ".")
@@ -128,6 +130,102 @@ class NativeTools:
         except Exception as exc:
             return ToolResult(ok=False, content="", error=str(exc))
 
+    def wordpress_rest_list_sites(self, payload: dict[str, Any]) -> ToolResult:
+        try:
+            client = self._wordpress_rest_client()
+            result = client.list_sites()
+            return ToolResult(ok=True, content=_json_dump(result), data=result)
+        except Exception as exc:
+            return ToolResult(ok=False, content="", error=str(exc))
+
+    def wordpress_rest_list_posts(self, payload: dict[str, Any]) -> ToolResult:
+        site = str(payload.get("site") or "").strip()
+        if not site:
+            return ToolResult(ok=False, content="", error="Missing required argument: site")
+        number = _as_int(payload.get("number")) or 20
+        status = payload.get("status")
+        try:
+            client = self._wordpress_rest_client()
+            result = client.list_posts(site, number=number, status=str(status) if isinstance(status, str) else None)
+            return ToolResult(ok=True, content=_json_dump(result), data=result)
+        except Exception as exc:
+            return ToolResult(ok=False, content="", error=str(exc))
+
+    def wordpress_rest_create_post(self, payload: dict[str, Any]) -> ToolResult:
+        site = str(payload.get("site") or "").strip()
+        title = str(payload.get("title") or "").strip()
+        content = str(payload.get("content") or "").strip()
+        if not site:
+            return ToolResult(ok=False, content="", error="Missing required argument: site")
+        if not title:
+            return ToolResult(ok=False, content="", error="Missing required argument: title")
+        if not content:
+            return ToolResult(ok=False, content="", error="Missing required argument: content")
+
+        status = str(payload.get("status") or "draft")
+        tags = payload.get("tags")
+        categories = payload.get("categories")
+        try:
+            client = self._wordpress_rest_client()
+            result = client.create_post(
+                site,
+                title=title,
+                content=content,
+                status=status,
+                tags=tags,
+                categories=categories,
+            )
+            return ToolResult(ok=True, content=_json_dump(result), data=result)
+        except Exception as exc:
+            return ToolResult(ok=False, content="", error=str(exc))
+
+    def wordpress_rest_update_post(self, payload: dict[str, Any]) -> ToolResult:
+        site = str(payload.get("site") or "").strip()
+        post_id = _as_int(payload.get("post_id"))
+        if not site:
+            return ToolResult(ok=False, content="", error="Missing required argument: site")
+        if post_id is None:
+            return ToolResult(ok=False, content="", error="Missing required argument: post_id")
+
+        title = payload.get("title")
+        content = payload.get("content")
+        status = payload.get("status")
+        try:
+            client = self._wordpress_rest_client()
+            result = client.update_post(
+                site,
+                post_id,
+                title=str(title) if isinstance(title, str) else None,
+                content=str(content) if isinstance(content, str) else None,
+                status=str(status) if isinstance(status, str) else None,
+            )
+            return ToolResult(ok=True, content=_json_dump(result), data=result)
+        except Exception as exc:
+            return ToolResult(ok=False, content="", error=str(exc))
+
+    def wordpress_rest_get_post(self, payload: dict[str, Any]) -> ToolResult:
+        site = str(payload.get("site") or "").strip()
+        post_id = _as_int(payload.get("post_id"))
+        if not site:
+            return ToolResult(ok=False, content="", error="Missing required argument: site")
+        if post_id is None:
+            return ToolResult(ok=False, content="", error="Missing required argument: post_id")
+        try:
+            client = self._wordpress_rest_client()
+            result = client.get_post(site, post_id)
+            return ToolResult(ok=True, content=_json_dump(result), data=result)
+        except Exception as exc:
+            return ToolResult(ok=False, content="", error=str(exc))
+
+    def _wordpress_rest_client(self) -> WordPressRestClient:
+        rest_cfg = self.config.get("wordpress_rest", {}) if isinstance(self.config.get("wordpress_rest"), dict) else {}
+        token = rest_cfg.get("token")
+        if not isinstance(token, str) or not token:
+            raise RuntimeError("WordPress REST token missing. Run 'thistlebot wordpress-rest login'.")
+        timeout = rest_cfg.get("timeout_seconds")
+        timeout_value = float(timeout) if isinstance(timeout, (int, float)) else 30.0
+        return WordPressRestClient(access_token=token, timeout_seconds=timeout_value)
+
 
 def _as_int(value: Any) -> int | None:
     if value is None:
@@ -140,3 +238,9 @@ def _as_int(value: Any) -> int | None:
 
 def workspace_exists(path: Path) -> bool:
     return path.exists() and path.is_dir()
+
+
+def _json_dump(value: Any) -> str:
+    import json
+
+    return json.dumps(value, ensure_ascii=False)

@@ -52,7 +52,7 @@ def build_tool_registry(config: dict, mcp_registry: MCPRegistry | None = None) -
 
     registry = ToolRegistry()
     if native_enabled:
-        native = NativeTools(policy)
+        native = NativeTools(policy, config=config)
         _register_native_tools(registry, native)
 
     if config.get("mcp", {}).get("enabled") and mcp_registry is not None:
@@ -74,6 +74,109 @@ def _register_native_tools(registry: ToolRegistry, native: NativeTools) -> None:
                 },
             ),
             execute=native.list_dir,
+            source="native",
+        )
+    )
+    registry.register(
+        ToolEntry(
+            spec=ToolSpec(
+                name="wordpress.rest.list_sites",
+                description="List WordPress.com sites available to the configured REST token.",
+                input_schema={"type": "object", "properties": {}},
+            ),
+            execute=native.wordpress_rest_list_sites,
+            source="native",
+        )
+    )
+    registry.register(
+        ToolEntry(
+            spec=ToolSpec(
+                name="wordpress.rest.list_posts",
+                description="List posts for a WordPress site via REST API.",
+                input_schema={
+                    "type": "object",
+                    "required": ["site"],
+                    "properties": {
+                        "site": {"type": "string"},
+                        "number": {"type": "integer"},
+                        "status": {"type": "string"},
+                    },
+                },
+            ),
+            execute=native.wordpress_rest_list_posts,
+            source="native",
+        )
+    )
+    registry.register(
+        ToolEntry(
+            spec=ToolSpec(
+                name="wordpress.rest.create_post",
+                description="Create a WordPress post via REST API.",
+                input_schema={
+                    "type": "object",
+                    "required": ["site", "title", "content"],
+                    "properties": {
+                        "site": {"type": "string"},
+                        "title": {"type": "string"},
+                        "content": {"type": "string"},
+                        "status": {"type": "string"},
+                        "tags": {
+                            "oneOf": [
+                                {"type": "string"},
+                                {"type": "array", "items": {"type": "string"}},
+                            ]
+                        },
+                        "categories": {
+                            "oneOf": [
+                                {"type": "string"},
+                                {"type": "array", "items": {"type": "string"}},
+                            ]
+                        },
+                    },
+                },
+                risk_level="medium",
+            ),
+            execute=native.wordpress_rest_create_post,
+            source="native",
+        )
+    )
+    registry.register(
+        ToolEntry(
+            spec=ToolSpec(
+                name="wordpress.rest.update_post",
+                description="Update a WordPress post via REST API.",
+                input_schema={
+                    "type": "object",
+                    "required": ["site", "post_id"],
+                    "properties": {
+                        "site": {"type": "string"},
+                        "post_id": {"type": "integer"},
+                        "title": {"type": "string"},
+                        "content": {"type": "string"},
+                        "status": {"type": "string"},
+                    },
+                },
+                risk_level="medium",
+            ),
+            execute=native.wordpress_rest_update_post,
+            source="native",
+        )
+    )
+    registry.register(
+        ToolEntry(
+            spec=ToolSpec(
+                name="wordpress.rest.get_post",
+                description="Get a WordPress post by ID via REST API.",
+                input_schema={
+                    "type": "object",
+                    "required": ["site", "post_id"],
+                    "properties": {
+                        "site": {"type": "string"},
+                        "post_id": {"type": "integer"},
+                    },
+                },
+            ),
+            execute=native.wordpress_rest_get_post,
             source="native",
         )
     )
