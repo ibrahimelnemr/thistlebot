@@ -96,6 +96,16 @@ DEFAULT_CONFIG: dict[str, Any] = {
                 },
                 "timeout_seconds": 30,
             },
+            "open-web-search": {
+                "enabled": False,
+                "transport": "stdio",
+                "command": "npx",
+                "args": ["-y", "open-websearch@latest"],
+                "env": {
+                    "MODE": "stdio",
+                },
+                "timeout_seconds": 30,
+            },
         },
     },
 }

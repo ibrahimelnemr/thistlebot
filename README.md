@@ -63,6 +63,51 @@ Optional checks:
 - GitHub status: `thistlebot github status`
 - GitHub repos: `thistlebot github repos --limit 20`
 
+## Open Web Search MCP setup (for blogger research)
+
+The blogger workflow can use MCP web search tools when MCP is enabled and
+`open-web-search` is configured.
+
+1. Install Node.js (which includes `npm` and `npx`).
+2. Verify `npx` is available:
+	 ```bash
+	 npx --version
+	 ```
+3. Enable MCP and `open-web-search` in thistlebot config:
+	 ```bash
+	 thistlebot mcp enable-open-web-search
+	 ```
+4. Verify the MCP server/tool visibility:
+	 ```bash
+	 thistlebot mcp status
+	 thistlebot mcp tools
+	 ```
+
+Equivalent config shape in `~/.thistlebot/config.json`:
+
+```json
+{
+	"mcp": {
+		"enabled": true,
+		"servers": {
+			"open-web-search": {
+				"enabled": true,
+				"transport": "stdio",
+				"command": "npx",
+				"args": ["-y", "open-websearch@latest"],
+				"env": {
+					"MODE": "stdio"
+				},
+				"timeout_seconds": 30
+			}
+		}
+	}
+}
+```
+
+If enabled correctly, blogger research steps can invoke web search MCP tools to
+gather fresher sources.
+
 ## WordPress setup (REST)
 
 Thistlebot uses the WordPress.com REST API for WordPress integration via:

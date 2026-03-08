@@ -1312,6 +1312,45 @@ def mcp_tools() -> None:
         typer.echo(name)
 
 
+@mcp_app.command("enable-open-web-search")
+def mcp_enable_open_web_search() -> None:
+    """Enable MCP and the open-web-search server in config."""
+    config = load_config()
+
+    mcp_cfg = config.get("mcp")
+    if not isinstance(mcp_cfg, dict):
+        mcp_cfg = {}
+        config["mcp"] = mcp_cfg
+
+    mcp_cfg["enabled"] = True
+    servers_cfg = mcp_cfg.get("servers")
+    if not isinstance(servers_cfg, dict):
+        servers_cfg = {}
+        mcp_cfg["servers"] = servers_cfg
+
+    open_web_search_cfg = servers_cfg.get("open-web-search")
+    if not isinstance(open_web_search_cfg, dict):
+        open_web_search_cfg = {
+            "transport": "stdio",
+            "command": "npx",
+            "args": ["-y", "open-websearch@latest"],
+            "env": {"MODE": "stdio"},
+            "timeout_seconds": 30,
+        }
+        servers_cfg["open-web-search"] = open_web_search_cfg
+
+    open_web_search_cfg["enabled"] = True
+    open_web_search_cfg.setdefault("transport", "stdio")
+    open_web_search_cfg.setdefault("command", "npx")
+    open_web_search_cfg.setdefault("args", ["-y", "open-websearch@latest"])
+    open_web_search_cfg.setdefault("env", {"MODE": "stdio"})
+    open_web_search_cfg.setdefault("timeout_seconds", 30)
+
+    write_config(config, force=True)
+    typer.echo("Enabled mcp.enabled=true and mcp.servers.open-web-search.enabled=true")
+    typer.echo("Run 'thistlebot mcp status' to verify connectivity.")
+
+
 @app.command()
 def mcp_connect() -> None:
     typer.echo("Deprecated. Use 'thistlebot mcp status' and 'thistlebot mcp tools'.")

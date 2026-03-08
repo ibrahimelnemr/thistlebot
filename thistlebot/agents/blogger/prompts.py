@@ -16,6 +16,8 @@ def research_messages(topic: str) -> list[dict[str, str]]:
                 "2. Key technical details that would interest a developer audience\n"
                 "3. Interesting philosophical or existential angles where relevant\n"
                 "4. Any relevant data points, statistics, or concrete examples\n\n"
+                "When a web search tool is available, use it to gather recent sources and "
+                "include source links in a short 'Sources' section at the end.\n\n"
                 "Focus on accuracy — only include facts you are confident about. "
                 "If you are uncertain about a specific date or figure, say so rather than "
                 "inventing one.\n\n"
