@@ -91,6 +91,17 @@ def _register_native_tools(registry: ToolRegistry, native: NativeTools) -> None:
     registry.register(
         ToolEntry(
             spec=ToolSpec(
+                name="wordpress.sites",
+                description="List WordPress.com sites available to the configured token.",
+                input_schema={"type": "object", "properties": {}},
+            ),
+            execute=native.wordpress_rest_list_sites,
+            source="native",
+        )
+    )
+    registry.register(
+        ToolEntry(
+            spec=ToolSpec(
                 name="wordpress.rest.list_posts",
                 description="List posts for a WordPress site via REST API.",
                 input_schema={
@@ -110,8 +121,60 @@ def _register_native_tools(registry: ToolRegistry, native: NativeTools) -> None:
     registry.register(
         ToolEntry(
             spec=ToolSpec(
+                name="wordpress.list_posts",
+                description="List posts for a WordPress site.",
+                input_schema={
+                    "type": "object",
+                    "required": ["site"],
+                    "properties": {
+                        "site": {"type": "string"},
+                        "number": {"type": "integer"},
+                        "status": {"type": "string"},
+                    },
+                },
+            ),
+            execute=native.wordpress_rest_list_posts,
+            source="native",
+        )
+    )
+    registry.register(
+        ToolEntry(
+            spec=ToolSpec(
                 name="wordpress.rest.create_post",
                 description="Create a WordPress post via REST API.",
+                input_schema={
+                    "type": "object",
+                    "required": ["site", "title", "content"],
+                    "properties": {
+                        "site": {"type": "string"},
+                        "title": {"type": "string"},
+                        "content": {"type": "string"},
+                        "status": {"type": "string"},
+                        "tags": {
+                            "oneOf": [
+                                {"type": "string"},
+                                {"type": "array", "items": {"type": "string"}},
+                            ]
+                        },
+                        "categories": {
+                            "oneOf": [
+                                {"type": "string"},
+                                {"type": "array", "items": {"type": "string"}},
+                            ]
+                        },
+                    },
+                },
+                risk_level="medium",
+            ),
+            execute=native.wordpress_rest_create_post,
+            source="native",
+        )
+    )
+    registry.register(
+        ToolEntry(
+            spec=ToolSpec(
+                name="wordpress.create_post",
+                description="Create a WordPress post.",
                 input_schema={
                     "type": "object",
                     "required": ["site", "title", "content"],

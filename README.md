@@ -63,6 +63,47 @@ Optional checks:
 - GitHub status: `thistlebot github status`
 - GitHub repos: `thistlebot github repos --limit 20`
 
+## WordPress setup (REST)
+
+Thistlebot uses the WordPress.com REST API for WordPress integration via:
+
+```bash
+thistlebot wordpress login
+thistlebot wordpress sites
+thistlebot wordpress test --yes
+```
+
+### Create a WordPress app (client id + client secret)
+
+1. Open `https://developer.wordpress.com/apps/` and create a new app.
+2. Set the redirect URI to exactly:
+	```text
+	http://127.0.0.1:8766/callback
+	```
+3. Save the app and copy the `client_id` and `client_secret`.
+
+### Login from Thistlebot
+
+```bash
+thistlebot wordpress login \
+  --client-id "<YOUR_CLIENT_ID>" \
+  --client-secret "<YOUR_CLIENT_SECRET>" \
+  --scope "posts sites media"
+```
+
+Then verify:
+
+```bash
+thistlebot wordpress status
+thistlebot wordpress sites
+```
+
+Create a draft test post:
+
+```bash
+thistlebot wordpress test --yes
+```
+
 ## Configure providers
 
 The setup command writes provider configuration into `~/.thistlebot/config.json`:

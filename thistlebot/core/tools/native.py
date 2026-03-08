@@ -218,10 +218,12 @@ class NativeTools:
             return ToolResult(ok=False, content="", error=str(exc))
 
     def _wordpress_rest_client(self) -> WordPressRestClient:
-        rest_cfg = self.config.get("wordpress_rest", {}) if isinstance(self.config.get("wordpress_rest"), dict) else {}
+        rest_cfg = self.config.get("wordpress", {}) if isinstance(self.config.get("wordpress"), dict) else {}
+        if not rest_cfg:
+            rest_cfg = self.config.get("wordpress_rest", {}) if isinstance(self.config.get("wordpress_rest"), dict) else {}
         token = rest_cfg.get("token")
         if not isinstance(token, str) or not token:
-            raise RuntimeError("WordPress REST token missing. Run 'thistlebot wordpress-rest login'.")
+            raise RuntimeError("WordPress token missing. Run 'thistlebot wordpress login'.")
         timeout = rest_cfg.get("timeout_seconds")
         timeout_value = float(timeout) if isinstance(timeout, (int, float)) else 30.0
         return WordPressRestClient(access_token=token, timeout_seconds=timeout_value)
