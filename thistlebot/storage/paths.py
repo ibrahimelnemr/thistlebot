@@ -36,6 +36,14 @@ def projects_dir() -> Path:
     return workspace_dir() / "projects"
 
 
+def agents_dir() -> Path:
+    return base_dir() / "agents"
+
+
+def agent_dir(name: str) -> Path:
+    return agents_dir() / name
+
+
 def ensure_base_dirs() -> None:
     for path in [
         base_dir(),
@@ -45,5 +53,6 @@ def ensure_base_dirs() -> None:
         logs_dir(),
         workspace_dir(),
         projects_dir(),
+        agents_dir(),
     ]:
         path.mkdir(parents=True, exist_ok=True)

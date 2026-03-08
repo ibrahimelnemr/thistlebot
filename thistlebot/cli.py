@@ -36,11 +36,15 @@ ollama_app = typer.Typer(help="Ollama diagnostics")
 llm_app = typer.Typer(help="LLM provider diagnostics")
 mcp_app = typer.Typer(help="MCP integrations")
 wordpress_app = typer.Typer(help="WordPress integrations (REST)")
+agent_app = typer.Typer(help="Persistent agent management")
+blogger_app = typer.Typer(help="Autonomous blogging agent")
 app.add_typer(github_app, name="github")
 app.add_typer(ollama_app, name="ollama")
 app.add_typer(llm_app, name="llm")
 app.add_typer(mcp_app, name="mcp")
 app.add_typer(wordpress_app, name="wordpress")
+app.add_typer(agent_app, name="agent")
+agent_app.add_typer(blogger_app, name="blogger")
 
 RICH_CONSOLE = Console()
 THINK_OPEN_MARKERS = (
@@ -1311,6 +1315,103 @@ def mcp_tools() -> None:
 @app.command()
 def mcp_connect() -> None:
     typer.echo("Deprecated. Use 'thistlebot mcp status' and 'thistlebot mcp tools'.")
+
+
+# ---------------------------------------------------------------------------
+# Agent: Blogger
+# ---------------------------------------------------------------------------
+
+
+@blogger_app.command("run")
+def blogger_run(
+    topic: Optional[str] = typer.Option(None, "--topic", help="Override the configured topic"),
+    status: Optional[str] = typer.Option(None, "--status", help="WordPress post status (draft/publish)"),
+) -> None:
+    """Execute one blogger workflow: research, draft, and publish."""
+    from .agents.blogger.workflow import run_publish_workflow
+
+    console = RICH_CONSOLE
+
+    def _on_step(step_name: str, step_status: str) -> None:
+        if step_status == "started":
+            console.print(f"[cyan]>> Step: {step_name}...[/cyan]")
+        elif step_status == "completed":
+            console.print(f"[green]   {step_name} completed.[/green]")
+
+    console.print("[bold]Blogger agent — running publish workflow[/bold]")
+
+    try:
+        result = run_publish_workflow(
+            topic_override=topic,
+            status_override=status,
+            on_step=_on_step,
+        )
+    except Exception as exc:
+        console.print(f"[red]Workflow failed: {exc}[/red]")
+        raise typer.Exit(code=1)
+
+    console.print()
+    console.print(f"[bold green]Workflow completed![/bold green]")
+    console.print(f"  Run dir: {result['run_dir']}")
+    console.print(f"  Topic:   {result['topic']}")
+    console.print(f"  Status:  {result['post_status']}")
+    console.print(f"  Model:   {result['model']}")
+
+    # Show final summary from the publish step
+    from pathlib import Path
+
+    final_path = Path(result["run_dir"]) / "final.md"
+    if final_path.exists():
+        console.print()
+        console.print("[bold]Publish summary:[/bold]")
+        console.print(final_path.read_text(encoding="utf-8")[:2000])
+
+
+@blogger_app.command("status")
+def blogger_status(
+    limit: int = typer.Option(5, "--limit", "-n", help="Number of recent runs to show"),
+) -> None:
+    """Show recent blogger workflow runs."""
+    from .agents.blogger.config import list_runs, load_blogger_config
+
+    console = RICH_CONSOLE
+    blogger_cfg = load_blogger_config()
+    console.print(f"[bold]Blogger agent[/bold]")
+    console.print(f"  Site:  {blogger_cfg.get('site', 'not configured')}")
+    console.print(f"  Topic: {blogger_cfg.get('topic', 'not configured')}")
+    console.print()
+
+    runs = list_runs()
+    if not runs:
+        console.print("No runs found.")
+        return
+
+    console.print(f"[bold]Recent runs (latest {limit}):[/bold]")
+    for run_dir in runs[:limit]:
+        meta_path = run_dir / "meta.json"
+        if meta_path.exists():
+            import json
+
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            run_status = meta.get("status", "unknown")
+            steps = meta.get("steps", {})
+            ts = meta.get("timestamp", "")
+            console.print(f"  {run_dir.name}  status={run_status}  steps={steps}  ts={ts}")
+        else:
+            # Infer status from which files exist
+            files = [f.name for f in run_dir.iterdir() if f.is_file()]
+            console.print(f"  {run_dir.name}  files={files}")
+
+
+@blogger_app.command("config")
+def blogger_config_show() -> None:
+    """Show current blogger configuration."""
+    from .agents.blogger.config import load_blogger_config
+
+    import json
+
+    cfg = load_blogger_config()
+    RICH_CONSOLE.print_json(json.dumps(cfg, indent=2))
 
 
 if __name__ == "__main__":
