@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import time
+import subprocess
 import webbrowser
 from typing import Any, Optional
 import json
@@ -1401,6 +1402,18 @@ def blogger_run(
     console.print(f"  Topic:   {result['topic']}")
     console.print(f"  Status:  {result['post_status']}")
     console.print(f"  Model:   {result['model']}")
+    if result.get("selected_idea_id"):
+        console.print(f"  Idea:    {result['selected_idea_id']}")
+    ideas_refresh = result.get("ideas_refresh")
+    if isinstance(ideas_refresh, dict):
+        if ideas_refresh.get("skipped"):
+            console.print(f"  Idea refresh: skipped ({ideas_refresh.get('reason', 'n/a')})")
+        else:
+            console.print(
+                "  Idea refresh: "
+                f"created={ideas_refresh.get('created_count', 0)} "
+                f"web_calls={ideas_refresh.get('web_tool_calls', 0)}"
+            )
 
     # Show final summary from the publish step
     from pathlib import Path
@@ -1418,12 +1431,25 @@ def blogger_status(
 ) -> None:
     """Show recent blogger workflow runs."""
     from .agents.blogger.config import list_runs, load_blogger_config
+    from .agents.memory import JsonFileMemoryStore
+    from .agents.runner import is_agent_daemon_running, read_agent_state
 
     console = RICH_CONSOLE
     blogger_cfg = load_blogger_config()
+    daemon_state = read_agent_state("blogger")
+    daemon_running = is_agent_daemon_running("blogger")
+    memory_store = JsonFileMemoryStore("blogger")
+
     console.print(f"[bold]Blogger agent[/bold]")
     console.print(f"  Site:  {blogger_cfg.get('site', 'not configured')}")
     console.print(f"  Topic: {blogger_cfg.get('topic', 'not configured')}")
+    console.print(f"  Daemon running: {daemon_running}")
+    if daemon_state:
+        console.print(f"  Last run at:   {daemon_state.get('last_run_at') or 'n/a'}")
+        console.print(f"  Next run at:   {daemon_state.get('next_run_at') or 'n/a'}")
+        console.print(f"  Last status:   {daemon_state.get('last_run_status') or 'n/a'}")
+        if daemon_state.get("last_error"):
+            console.print(f"  Last error:    {daemon_state.get('last_error')}")
     console.print()
 
     runs = list_runs()
@@ -1447,6 +1473,15 @@ def blogger_status(
             files = [f.name for f in run_dir.iterdir() if f.is_file()]
             console.print(f"  {run_dir.name}  files={files}")
 
+    recent_memories = memory_store.list_recent(limit=limit)
+    if recent_memories:
+        console.print()
+        console.print(f"[bold]Recent memory summaries (latest {limit}):[/bold]")
+        for entry in recent_memories:
+            console.print(
+                f"  {entry.timestamp}  {entry.type}  run={entry.run_id or '-'}  {entry.summary[:120]}"
+            )
+
 
 @blogger_app.command("config")
 def blogger_config_show() -> None:
@@ -1457,6 +1492,166 @@ def blogger_config_show() -> None:
 
     cfg = load_blogger_config()
     RICH_CONSOLE.print_json(json.dumps(cfg, indent=2))
+
+
+@blogger_app.command("setup")
+def blogger_setup(
+    site: Optional[str] = typer.Option(None, "--site", help="WordPress site, e.g. your-site.wordpress.com"),
+    topic: Optional[str] = typer.Option(None, "--topic", help="Default topic focus"),
+    post_status: str = typer.Option("draft", "--post-status", help="Default post status (draft/publish)"),
+    schedule_enabled: bool = typer.Option(False, "--schedule-enabled", help="Enable scheduled daemon runs"),
+    cron: str = typer.Option("0 9,21 * * *", "--cron", help="Cron expression for scheduled runs"),
+    timezone: str = typer.Option("UTC", "--timezone", help="Scheduler timezone"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip interactive prompts and use provided/default values"),
+) -> None:
+    """Interactive setup for the blogger agent runtime config."""
+    from .agents.blogger.config import DEFAULT_BLOGGER_CONFIG, blogger_config_path, load_blogger_config
+
+    cfg = load_config()
+    wp_cfg = cfg.get("wordpress", {}) if isinstance(cfg.get("wordpress"), dict) else {}
+    wp_token = str(wp_cfg.get("token") or "").strip()
+    wp_site = str(wp_cfg.get("blog") or "").strip()
+
+    if not wp_token:
+        typer.echo("WordPress token missing. Run 'thistlebot wordpress login' first.", err=True)
+        raise typer.Exit(code=1)
+
+    existing = load_blogger_config()
+    selected_site = site or (existing.get("site") if isinstance(existing.get("site"), str) else None) or wp_site
+    default_topic = topic or str(existing.get("topic") or DEFAULT_BLOGGER_CONFIG.get("topic") or "Latest AI news")
+
+    if not yes:
+        if not selected_site:
+            selected_site = typer.prompt("WordPress site", default=wp_site or "your-site.wordpress.com").strip()
+        default_topic = typer.prompt("Default topic", default=default_topic).strip()
+        post_status = typer.prompt("Default post status", default=post_status).strip().lower() or "draft"
+        schedule_enabled = typer.confirm("Enable scheduled blogger runs?", default=schedule_enabled)
+        if schedule_enabled:
+            cron = typer.prompt("Schedule cron", default=cron).strip()
+            timezone = typer.prompt("Schedule timezone", default=timezone).strip()
+
+    if not selected_site:
+        typer.echo("Unable to determine WordPress site. Provide --site or set wordpress.blog.", err=True)
+        raise typer.Exit(code=1)
+
+    if post_status not in {"draft", "publish"}:
+        typer.echo("--post-status must be either 'draft' or 'publish'.", err=True)
+        raise typer.Exit(code=1)
+
+    merged = dict(DEFAULT_BLOGGER_CONFIG)
+    if isinstance(existing, dict):
+        merged.update(existing)
+
+    merged["site"] = selected_site
+    merged["topic"] = default_topic or "Latest AI news"
+    merged["post_status"] = post_status
+
+    schedule_cfg = merged.get("schedule") if isinstance(merged.get("schedule"), dict) else {}
+    schedule_cfg = dict(schedule_cfg)
+    schedule_cfg["enabled"] = bool(schedule_enabled)
+    schedule_cfg["cron"] = cron
+    schedule_cfg["timezone"] = timezone
+    merged["schedule"] = schedule_cfg
+
+    path = blogger_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(merged, indent=2), encoding="utf-8")
+
+    typer.echo("Blogger setup complete.")
+    typer.echo(f"Config: {path}")
+    typer.echo(f"Site: {selected_site}")
+    typer.echo(f"Topic: {merged['topic']}")
+    typer.echo(f"Default status: {post_status}")
+    if schedule_enabled:
+        typer.echo(f"Schedule: {cron} ({timezone})")
+
+    typer.echo("Next steps:")
+    typer.echo("  1) thistlebot agent blogger run --status draft")
+    typer.echo("  2) thistlebot agent blogger start   # if schedule enabled")
+
+
+@blogger_app.command("ideas-refresh")
+def blogger_ideas_refresh(
+    topic: Optional[str] = typer.Option(None, "--topic", help="Topic to scout ideas for"),
+    count: Optional[int] = typer.Option(None, "--count", help="Number of ideas to request"),
+    force: bool = typer.Option(False, "--force", help="Ignore minimum refresh interval"),
+) -> None:
+    """Run the idea discovery refresh workflow and update backlog files."""
+    from .agents.blogger.config import load_blogger_config
+    from .agents.blogger.ideas import refresh_idea_backlog
+    from .core.tools.registry import build_tool_registry
+    from .integrations.mcp.registry import build_mcp_registry
+    from .llm.factory import build_llm_client, get_default_model
+    from .storage.state import load_config
+
+    cfg = load_config()
+    blogger_cfg = load_blogger_config()
+    ideas_cfg = blogger_cfg.get("ideas", {}) if isinstance(blogger_cfg.get("ideas"), dict) else {}
+
+    client = build_llm_client(cfg)
+    model = get_default_model(cfg)
+    mcp_registry = build_mcp_registry(cfg) if cfg.get("mcp", {}).get("enabled") else None
+    registry = build_tool_registry(cfg, mcp_registry)
+
+    target_topic = topic or str(blogger_cfg.get("topic") or "")
+    refresh_count = int(count if count is not None else ideas_cfg.get("refresh_count", 6))
+
+    result = refresh_idea_backlog(
+        client=client,
+        registry=registry,
+        model=model,
+        topic=target_topic,
+        count=refresh_count,
+        query_count=int(ideas_cfg.get("query_count", 8)),
+        max_iterations=int(ideas_cfg.get("max_iterations", 14)),
+        prefer_web=bool(ideas_cfg.get("prefer_web", True)),
+        force=force,
+        min_refresh_interval_minutes=int(ideas_cfg.get("min_refresh_interval_minutes", 180)),
+    )
+
+    console = RICH_CONSOLE
+    if result.get("skipped"):
+        console.print(f"[yellow]Idea refresh skipped:[/yellow] {result.get('reason', 'n/a')}")
+        return
+    console.print("[green]Idea refresh completed.[/green]")
+    console.print(f"  Created ideas: {result.get('created_count', 0)}")
+    console.print(f"  Total ideas:   {result.get('total_ideas', 0)}")
+    console.print(f"  Web calls:     {result.get('web_tool_calls', 0)}")
+
+
+@blogger_app.command("ideas-list")
+def blogger_ideas_list(
+    status: Optional[str] = typer.Option(None, "--status", help="Filter by status: new|selected|used|archived"),
+    limit: int = typer.Option(15, "--limit", "-n", help="Maximum number of ideas"),
+) -> None:
+    """List ideas currently tracked in the blogger backlog."""
+    from .agents.blogger.ideas import list_ideas
+
+    ideas = list_ideas(status=status, limit=limit)
+    console = RICH_CONSOLE
+    if not ideas:
+        console.print("No ideas found.")
+        return
+
+    for item in ideas:
+        console.print(
+            f"- {item.get('id')}  [{item.get('status')}]  score={item.get('score')}  {item.get('title')}",
+            markup=False,
+        )
+
+
+@blogger_app.command("ideas-select")
+def blogger_ideas_select(
+    idea_id: str = typer.Option(..., "--id", help="Idea id to mark as selected"),
+) -> None:
+    """Mark one idea as selected for the next automatic publish run."""
+    from .agents.blogger.ideas import manual_select_idea
+
+    ok = manual_select_idea(idea_id)
+    if not ok:
+        typer.echo(f"Idea not found: {idea_id}", err=True)
+        raise typer.Exit(code=1)
+    typer.echo(f"Selected idea: {idea_id}")
 
 
 @blogger_app.command("retry-publish")
@@ -1501,6 +1696,81 @@ def blogger_retry_publish(
         console.print()
         console.print("[bold]Publish summary:[/bold]")
         console.print(final_path.read_text(encoding="utf-8")[:2000])
+
+
+@blogger_app.command("start")
+def blogger_start(
+    foreground: bool = typer.Option(False, "--foreground", help="Run in foreground (blocks terminal)"),
+) -> None:
+    """Start the blogger daemon scheduler."""
+    from .agents.blogger.config import load_blogger_config
+    from .agents.runner import AgentDaemon, is_agent_daemon_running
+    from .storage.paths import agent_log_path
+
+    cfg = load_blogger_config()
+    schedule_cfg = cfg.get("schedule", {}) if isinstance(cfg.get("schedule"), dict) else {}
+
+    if not bool(schedule_cfg.get("enabled", False)):
+        typer.echo("Blogger schedule is disabled in config (set schedule.enabled=true).", err=True)
+        raise typer.Exit(code=1)
+
+    if is_agent_daemon_running("blogger"):
+        typer.echo("Blogger daemon is already running.")
+        raise typer.Exit(code=0)
+
+    if foreground:
+        from .agents.blogger.workflow import run_publish_workflow
+
+        daemon = AgentDaemon(
+            agent_name="blogger",
+            schedule_config=schedule_cfg,
+            run_once=lambda: run_publish_workflow(),
+        )
+        typer.echo("Starting blogger daemon in foreground. Press Ctrl+C to stop.")
+        daemon.run_forever()
+        return
+
+    log_path = agent_log_path("blogger")
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("a", encoding="utf-8") as log_fh:
+        subprocess.Popen(  # noqa: S603
+            [sys.executable, "-m", "thistlebot", "agent", "blogger", "daemon-run"],
+            stdout=log_fh,
+            stderr=log_fh,
+            start_new_session=True,
+        )
+
+    typer.echo("Blogger daemon start requested.")
+    typer.echo(f"Log file: {log_path}")
+
+
+@blogger_app.command("stop")
+def blogger_stop() -> None:
+    """Stop the blogger daemon scheduler."""
+    from .agents.runner import stop_agent_daemon
+
+    ok = stop_agent_daemon("blogger")
+    if not ok:
+        typer.echo("No running blogger daemon found.")
+        raise typer.Exit(code=1)
+    typer.echo("Stop signal sent to blogger daemon.")
+
+
+@blogger_app.command("daemon-run", hidden=True)
+def blogger_daemon_run() -> None:
+    """Internal command used by `blogger start` background process."""
+    from .agents.blogger.config import load_blogger_config
+    from .agents.blogger.workflow import run_publish_workflow
+    from .agents.runner import AgentDaemon
+
+    cfg = load_blogger_config()
+    schedule_cfg = cfg.get("schedule", {}) if isinstance(cfg.get("schedule"), dict) else {}
+    daemon = AgentDaemon(
+        agent_name="blogger",
+        schedule_config=schedule_cfg,
+        run_once=lambda: run_publish_workflow(),
+    )
+    daemon.run_forever()
 
 
 if __name__ == "__main__":

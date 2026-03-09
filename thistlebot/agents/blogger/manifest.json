@@ -4,6 +4,7 @@
   "description": "Autonomous blogger agent with iterative quality gates and WordPress publishing.",
   "required_config": ["topic", "site", "post_status"],
   "prompts": {
+    "idea_scout": "prompts/idea_scout.md",
     "researcher": "prompts/researcher.md",
     "writer": "prompts/writer.md",
     "editor": "prompts/editor.md",

@@ -108,6 +108,91 @@ Equivalent config shape in `~/.thistlebot/config.json`:
 If enabled correctly, blogger research steps can invoke web search MCP tools to
 gather fresher sources.
 
+## Blogger agent scheduling and memory
+
+The blogger agent supports scheduled autonomous runs using a local daemon.
+
+1. Configure `~/.thistlebot/agents/blogger/config.json` schedule fields:
+	- `schedule.enabled`: `true`
+	- `schedule.cron`: cron expression (example: `0 9,21 * * *`)
+	- Optional convenience fields: `schedule.times_per_day`, `schedule.interval_minutes`, or `schedule.interval_seconds`
+2. Start the daemon:
+	```bash
+	thistlebot agent blogger start
+	```
+3. Check status and recent memory-backed summaries:
+	```bash
+	thistlebot agent blogger status -n 5
+	```
+4. Stop the daemon:
+	```bash
+	thistlebot agent blogger stop
+	```
+
+Run memories are stored in:
+
+- `~/.thistlebot/agents/blogger/memory/index.json` (index of step/run entries)
+- `~/.thistlebot/agents/blogger/runs/<run_id>/` (workflow artifacts)
+
+## Blogger Agent Setup (Recommended)
+
+Use the guided setup command to configure blogger quickly after WordPress login:
+
+```bash
+thistlebot agent blogger setup
+```
+
+This setup command:
+
+- verifies a WordPress token exists,
+- sets/updates the blog site domain,
+- sets a default topic (AI news by default),
+- sets default post status (`draft` recommended),
+- optionally enables scheduling.
+
+Common non-interactive setup example:
+
+```bash
+thistlebot agent blogger setup \
+	--site "your-site.wordpress.com" \
+	--topic "Your Blog Topic" \
+	--post-status draft \
+	--schedule-enabled \
+	--cron "0 9,21 * * *" \
+	--timezone UTC \
+	--yes
+```
+
+Quick run after setup:
+
+```bash
+thistlebot agent blogger run --status draft
+```
+
+## Publish Reliability Notes
+
+Why publish can fail:
+
+- The LLM may generate a final answer without calling `wordpress.create_post`.
+- The workflow guard rejects this case to avoid false "published" claims.
+- External web/MCP timeouts can consume iterations before publish-tool usage.
+
+Reliability measures in place:
+
+- Prompt-level hardening in `publisher.md` requiring explicit tool invocation.
+- Guard-level enforcement requiring successful create-post tool result.
+- Deterministic fallback in workflow execution: if publish step reaches final answer
+	without a successful WordPress create-post call, Thistlebot attempts direct
+	publish using resolved step inputs and registered WordPress tools.
+
+Operational tips:
+
+- Keep default `post_status` as `draft` until behavior is stable.
+- Use `thistlebot agent blogger retry-publish --run-id <id> --status draft` for
+	publish-only retries.
+- Check `~/.thistlebot/agents/blogger/runs/<run_id>/events.jsonl` for tool-call
+	traces when debugging publish failures.
+
 ## WordPress setup (REST)
 
 Thistlebot uses the WordPress.com REST API for WordPress integration via:

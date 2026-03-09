@@ -44,6 +44,22 @@ def agent_dir(name: str) -> Path:
     return agents_dir() / name
 
 
+def agent_state_path(name: str) -> Path:
+    return agent_dir(name) / "state.json"
+
+
+def agent_logs_dir(name: str) -> Path:
+    return agent_dir(name) / "logs"
+
+
+def agent_log_path(name: str, filename: str = "agent.log") -> Path:
+    return agent_logs_dir(name) / filename
+
+
+def agent_memory_dir(name: str) -> Path:
+    return agent_dir(name) / "memory"
+
+
 def ensure_base_dirs() -> None:
     for path in [
         base_dir(),

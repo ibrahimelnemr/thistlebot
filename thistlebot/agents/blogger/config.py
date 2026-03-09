@@ -14,14 +14,16 @@ from ...storage.state import load_config as _load_main_config
 # runtime config (~/.thistlebot/agents/blogger/config.json → site).
 DEFAULT_BLOGGER_CONFIG: dict[str, Any] = {
     "topic": (
-        "Recent developments in AI, existential questions about artificial intelligence, "
-        "and their implications for software developers"
+        "Latest AI news"
     ),
-    "post_status": "publish",
+    "post_status": "draft",
     "schedule": {
         "enabled": False,
         "cron": "0 9,21 * * *",
         "timezone": "UTC",
+        "times_per_day": None,
+        "interval_minutes": None,
+        "interval_seconds": None,
     },
     "workflow": {
         "research_max_iterations": 12,
@@ -31,6 +33,15 @@ DEFAULT_BLOGGER_CONFIG: dict[str, Any] = {
         "publish_max_iterations": 8,
         "max_revisions": 2,
         "verify_pass_token": "VERDICT: PASS",
+    },
+    "ideas": {
+        "auto_refresh_before_publish": True,
+        "refresh_count": 6,
+        "query_count": 8,
+        "max_iterations": 14,
+        "prefer_web": True,
+        "min_refresh_interval_minutes": 180,
+        "failure_selected_action": "new",
     },
 }
 
@@ -49,6 +60,22 @@ def blogger_config_path() -> Path:
 
 def blogger_runs_dir() -> Path:
     return blogger_dir() / "runs"
+
+
+def blogger_ideas_dir() -> Path:
+    return blogger_dir() / "ideas"
+
+
+def blogger_ideas_index_path() -> Path:
+    return blogger_ideas_dir() / "index.json"
+
+
+def blogger_ideas_markdown_path() -> Path:
+    return blogger_ideas_dir() / "ideas.md"
+
+
+def blogger_ideas_batches_dir() -> Path:
+    return blogger_ideas_dir() / "batches"
 
 
 def _resolve_site(blogger_cfg: dict[str, Any]) -> str | None:
@@ -77,9 +104,21 @@ def load_blogger_config() -> dict[str, Any]:
     path = blogger_config_path()
     if path.exists():
         raw = json.loads(path.read_text(encoding="utf-8"))
-        # Merge defaults for any missing keys
+        # Merge defaults for any missing keys.
         merged = dict(DEFAULT_BLOGGER_CONFIG)
         merged.update(raw)
+
+        # Keep nested defaults even when users have partial nested config.
+        for nested_key in ("schedule", "workflow", "ideas"):
+            default_nested = DEFAULT_BLOGGER_CONFIG.get(nested_key)
+            merged_nested = merged.get(nested_key)
+            if isinstance(default_nested, dict):
+                if isinstance(merged_nested, dict):
+                    nested = dict(default_nested)
+                    nested.update(merged_nested)
+                    merged[nested_key] = nested
+                else:
+                    merged[nested_key] = dict(default_nested)
     else:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(DEFAULT_BLOGGER_CONFIG, indent=2), encoding="utf-8")
