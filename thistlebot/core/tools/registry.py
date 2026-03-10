@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fnmatch
 import json
 from typing import Any
 
@@ -44,7 +45,12 @@ class ToolRegistry:
         return sorted(self._tools.keys())
 
 
-def build_tool_registry(config: dict, mcp_registry: MCPRegistry | None = None) -> ToolRegistry:
+def build_tool_registry(
+    config: dict,
+    mcp_registry: MCPRegistry | None = None,
+    *,
+    tool_spec: dict[str, Any] | None = None,
+) -> ToolRegistry:
     policy = ToolPolicy.from_config(config)
     tools_cfg = config.get("tools", {})
     native_cfg = tools_cfg.get("native", {})
@@ -59,7 +65,36 @@ def build_tool_registry(config: dict, mcp_registry: MCPRegistry | None = None) -
         for mcp_entry in mcp_registry.tool_entries():
             registry.register(mcp_entry)
 
+    if isinstance(tool_spec, dict) and tool_spec:
+        registry = _filter_registry_by_spec(registry, tool_spec)
+
     return registry
+
+
+def _filter_registry_by_spec(registry: ToolRegistry, tool_spec: dict[str, Any]) -> ToolRegistry:
+    native_patterns = tool_spec.get("native") if isinstance(tool_spec.get("native"), list) else []
+    mcp_patterns = tool_spec.get("mcp") if isinstance(tool_spec.get("mcp"), list) else []
+    allow_filesystem = bool(tool_spec.get("filesystem", False))
+    allow_exec = bool(tool_spec.get("exec", False))
+
+    selected = ToolRegistry()
+    for name, entry in registry._tools.items():
+        is_native = entry.source == "native"
+        is_mcp = entry.source == "mcp"
+
+        if is_native:
+            if name == "exec" and not allow_exec:
+                continue
+            if name in {"list_dir", "read_file", "write_file", "edit_file"} and not allow_filesystem:
+                continue
+            if native_patterns and not any(fnmatch.fnmatch(name, pattern) for pattern in native_patterns):
+                continue
+
+        if is_mcp and mcp_patterns and not any(fnmatch.fnmatch(name, pattern) for pattern in mcp_patterns):
+            continue
+
+        selected.register(entry)
+    return selected
 
 
 def _register_native_tools(registry: ToolRegistry, native: NativeTools) -> None:

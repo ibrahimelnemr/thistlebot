@@ -80,7 +80,7 @@ def execute_workflow(
             model=model,
         )
 
-        _validate_publish_step(step=step, step_events=step_events)
+        _validate_step_required_tools(step=step, step_events=step_events)
 
         state.setdefault("step_attempts", {})
         state["step_attempts"][step_id] = int(state["step_attempts"].get(step_id, 0)) + 1
@@ -230,6 +230,7 @@ def _execute_step(
     max_iterations = int(step.get("max_iterations", 8))
     output_text = ""
     events: list[dict[str, Any]] = []
+    step_id = str(step.get("id") or "")
     try:
         response = run_tool_agent(
             client=client,
@@ -245,20 +246,21 @@ def _execute_step(
         else:
             output_text, events = str(response), []
     except Exception as exc:
-        if str(step.get("id") or "") != "publish":
+        if not _required_step_tools(step):
             raise
         events = [
             {
-                "event": "publish_model_error",
+                "event": "required_tool_model_error",
+                "step": step_id,
                 "error": str(exc),
             }
         ]
-        output_text = "Publish model step failed; attempting deterministic fallback publish."
+        output_text = "Model step failed; attempting deterministic required-tool fallback."
 
-    # Reliability fallback: if publish step doesn't call the required WordPress
-    # tool successfully, invoke a direct publish call using resolved inputs.
-    output_text, events = _maybe_publish_fallback(
+    # Reliability fallback for steps that require successful tool calls.
+    output_text, events = _maybe_required_tool_fallback(
         step=step,
+        step_id=step_id,
         resolved_inputs=resolved_inputs,
         registry=registry,
         output_text=output_text,
@@ -396,17 +398,10 @@ def _ts() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _validate_publish_step(*, step: dict[str, Any], step_events: list[dict[str, Any]]) -> None:
-    """Require publish steps to actually call and succeed on WordPress create post tools."""
-    step_id = str(step.get("id") or "")
-    if step_id != "publish":
+def _validate_step_required_tools(*, step: dict[str, Any], step_events: list[dict[str, Any]]) -> None:
+    required_tools = _required_step_tools(step)
+    if not required_tools:
         return
-
-    required_tools_raw = step.get("required_success_tools")
-    if isinstance(required_tools_raw, list) and required_tools_raw:
-        required_tools = [str(item) for item in required_tools_raw if str(item).strip()]
-    else:
-        required_tools = ["wordpress.create_post", "wordpress.rest.create_post"]
 
     seen_required_call = False
     for event in step_events:
@@ -421,24 +416,23 @@ def _validate_publish_step(*, step: dict[str, Any], step_events: list[dict[str, 
 
     if not seen_required_call:
         raise RuntimeError(
-            "Publish step did not call a required WordPress create-post tool. "
-            "No post was published."
+            f"Step '{step.get('id')}' did not call any required_success_tools: {required_tools}."
         )
 
     raise RuntimeError(
-        "Publish step called WordPress create-post tool, but no successful result was recorded."
+        f"Step '{step.get('id')}' called required tools, but none returned success."
     )
 
 
-def _required_publish_tools(step: dict[str, Any]) -> list[str]:
+def _required_step_tools(step: dict[str, Any]) -> list[str]:
     required_tools_raw = step.get("required_success_tools")
     if isinstance(required_tools_raw, list) and required_tools_raw:
         return [str(item) for item in required_tools_raw if str(item).strip()]
-    return ["wordpress.create_post", "wordpress.rest.create_post"]
+    return []
 
 
-def _has_successful_publish_call(step: dict[str, Any], events: list[dict[str, Any]]) -> bool:
-    required_tools = set(_required_publish_tools(step))
+def _has_successful_required_call(step: dict[str, Any], events: list[dict[str, Any]]) -> bool:
+    required_tools = set(_required_step_tools(step))
     for event in events:
         if event.get("event") != "tool_result":
             continue
@@ -449,66 +443,97 @@ def _has_successful_publish_call(step: dict[str, Any], events: list[dict[str, An
     return False
 
 
-def _maybe_publish_fallback(
+def _maybe_required_tool_fallback(
     *,
     step: dict[str, Any],
+    step_id: str,
     resolved_inputs: dict[str, Any],
     registry: ToolRegistry,
     output_text: str,
     events: list[dict[str, Any]],
 ) -> tuple[str, list[dict[str, Any]]]:
-    if str(step.get("id") or "") != "publish":
+    required_tools = _required_step_tools(step)
+    if not required_tools:
         return output_text, events
 
-    if _has_successful_publish_call(step, events):
+    if _has_successful_required_call(step, events):
         return output_text, events
 
-    site = str(resolved_inputs.get("site") or "").strip()
-    post_status = str(resolved_inputs.get("post_status") or "draft").strip() or "draft"
-    draft = str(resolved_inputs.get("draft") or "")
-    if not site or not draft.strip():
+    fallback_spec = step.get("fallback")
+    if not isinstance(fallback_spec, dict):
         return output_text, events
 
-    title, body = _parse_draft_title_and_body(draft)
-    if not title or not body:
+    fallback_tool = str(fallback_spec.get("tool") or "").strip()
+    if not fallback_tool:
         return output_text, events
 
-    tags = _tags_from_title(title)
-    payload = {
-        "site": site,
-        "title": title,
-        "content": body,
-        "status": post_status,
-        "tags": tags,
-    }
+    payload = _build_fallback_payload(step_id=step_id, resolved_inputs=resolved_inputs, fallback_spec=fallback_spec)
+    if not payload:
+        return output_text, events
 
-    required_tools = _required_publish_tools(step)
     fallback_events: list[dict[str, Any]] = [
         {
-            "event": "publish_fallback_attempt",
-            "reason": "no_successful_publish_tool_call_from_model",
+            "event": "required_tool_fallback_attempt",
+            "step": step_id,
+            "reason": "no_successful_required_tool_call_from_model",
         }
     ]
 
-    for tool_name in required_tools:
-        fallback_events.append({"event": "tool_call", "tool": tool_name, "args": payload, "fallback": True})
-        result = registry.invoke(tool_name, payload)
-        fallback_events.append(
-            {
-                "event": "tool_result",
-                "tool": tool_name,
-                "ok": result.ok,
-                "error": result.error,
-                "content": result.content,
-                "truncated": result.truncated,
-                "fallback": True,
-            }
-        )
-        if result.ok:
-            summary = _fallback_publish_summary(result=result, title=title, status=post_status)
-            return summary, events + fallback_events
+    fallback_events.append({"event": "tool_call", "tool": fallback_tool, "args": payload, "fallback": True})
+    result = registry.invoke(fallback_tool, payload)
+    fallback_events.append(
+        {
+            "event": "tool_result",
+            "tool": fallback_tool,
+            "ok": result.ok,
+            "error": result.error,
+            "content": result.content,
+            "truncated": result.truncated,
+            "fallback": True,
+        }
+    )
+    if result.ok:
+        summary = _fallback_success_summary(step_id=step_id, result=result)
+        return summary, events + fallback_events
 
     return output_text, events + fallback_events
+
+
+def _build_fallback_payload(*, step_id: str, resolved_inputs: dict[str, Any], fallback_spec: dict[str, Any]) -> dict[str, Any]:
+    args_map = fallback_spec.get("args_from_inputs")
+    if not isinstance(args_map, dict):
+        return {}
+
+    draft = str(resolved_inputs.get("draft") or "")
+    parsed_title, parsed_body = _parse_draft_title_and_body(draft)
+    payload: dict[str, Any] = {}
+    for key, mapping in args_map.items():
+        if isinstance(mapping, str) and mapping == "__derive_title__":
+            if parsed_title:
+                payload[key] = parsed_title
+            continue
+        if isinstance(mapping, str) and mapping == "__derive_body__":
+            if parsed_body:
+                payload[key] = parsed_body
+            continue
+        if isinstance(mapping, str) and mapping == "__derive_tags__":
+            source_title = parsed_title or str(resolved_inputs.get("topic") or "")
+            payload[key] = _tags_from_title(source_title or "AI News Update")
+            continue
+        if isinstance(mapping, str):
+            value = resolved_inputs.get(mapping)
+            if value is not None:
+                payload[key] = value
+            continue
+        payload[key] = mapping
+
+    required_fields = fallback_spec.get("required_fields")
+    if isinstance(required_fields, list):
+        for field_name in required_fields:
+            name = str(field_name)
+            if name and payload.get(name) in {None, ""}:
+                return {}
+    return payload
 
 
 def _parse_draft_title_and_body(draft: str) -> tuple[str, str]:
@@ -545,7 +570,7 @@ def _tags_from_title(title: str) -> list[str]:
     return tags
 
 
-def _fallback_publish_summary(*, result: Any, title: str, status: str) -> str:
+def _fallback_success_summary(*, step_id: str, result: Any) -> str:
     payload = result.data if isinstance(result.data, dict) else {}
     inner = payload.get("data") if isinstance(payload.get("data"), dict) else payload
     post_id = inner.get("ID") if isinstance(inner, dict) else None
@@ -553,12 +578,11 @@ def _fallback_publish_summary(*, result: Any, title: str, status: str) -> str:
     if isinstance(inner, dict):
         post_url = inner.get("URL") or inner.get("url")
     return (
-        "PUBLISH_STATUS: SUCCESS\n"
+        f"STEP_STATUS: SUCCESS\n"
+        f"STEP_ID: {step_id}\n"
         f"POST_ID: {post_id if post_id is not None else 'unknown'}\n"
         f"POST_URL: {post_url or 'unknown'}\n"
-        f"Title: {title}\n"
-        f"Status: {status}\n"
-        "Summary: Published using deterministic fallback after missing model tool call."
+        "Summary: Completed using deterministic fallback after missing model tool call."
     )
 
 

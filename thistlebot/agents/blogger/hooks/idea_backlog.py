@@ -7,29 +7,37 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from ...core.agent_runtime import run_tool_agent
-from ...core.tools.registry import ToolRegistry
-from ...integrations.wordpress.rest_client import WordPressRestClient
-from ...llm.base import BaseLLMClient
-from ...storage.state import load_config
-from .config import (
-    blogger_ideas_batches_dir,
-    blogger_ideas_index_path,
-    blogger_ideas_markdown_path,
-)
+from ....core.agent_runtime import run_tool_agent
+from ....core.tools.registry import ToolRegistry
+from ....integrations.wordpress.rest_client import WordPressRestClient
+from ....llm.base import BaseLLMClient
+from ....storage.paths import agent_dir
+from ....storage.state import load_config
+from ...hooks.base import HookContext, HookResult
 
-_IDEAS_PROMPT_PATH = Path(__file__).resolve().parent / "prompts" / "idea_scout.md"
+_IDEAS_PROMPT_PATH = Path(__file__).resolve().parent.parent / "prompts" / "idea_scout.md"
 
 
-def load_idea_index() -> dict[str, Any]:
-    path = blogger_ideas_index_path()
+def _ideas_dir(agent_name: str = "blogger") -> Path:
+    return agent_dir(agent_name) / "ideas"
+
+
+def _ideas_index_path(agent_name: str = "blogger") -> Path:
+    return _ideas_dir(agent_name) / "index.json"
+
+
+def _ideas_markdown_path(agent_name: str = "blogger") -> Path:
+    return _ideas_dir(agent_name) / "ideas.md"
+
+
+def _ideas_batches_dir(agent_name: str = "blogger") -> Path:
+    return _ideas_dir(agent_name) / "batches"
+
+
+def load_idea_index(agent_name: str = "blogger") -> dict[str, Any]:
+    path = _ideas_index_path(agent_name)
     if not path.exists():
-        return {
-            "version": 1,
-            "updated_at": "",
-            "last_refresh_at": "",
-            "ideas": [],
-        }
+        return {"version": 1, "updated_at": "", "last_refresh_at": "", "ideas": []}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
@@ -44,8 +52,8 @@ def load_idea_index() -> dict[str, Any]:
     return data
 
 
-def list_ideas(*, status: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
-    ideas = load_idea_index().get("ideas", [])
+def list_ideas(*, agent_name: str = "blogger", status: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
+    ideas = load_idea_index(agent_name).get("ideas", [])
     if not isinstance(ideas, list):
         return []
     filtered = [item for item in ideas if isinstance(item, dict)]
@@ -58,6 +66,7 @@ def list_ideas(*, status: str | None = None, limit: int = 20) -> list[dict[str, 
 
 def refresh_idea_backlog(
     *,
+    agent_name: str = "blogger",
     client: BaseLLMClient,
     registry: ToolRegistry,
     model: str,
@@ -69,7 +78,7 @@ def refresh_idea_backlog(
     force: bool = False,
     min_refresh_interval_minutes: int = 0,
 ) -> dict[str, Any]:
-    index = load_idea_index()
+    index = load_idea_index(agent_name)
     now = datetime.now(timezone.utc)
     existing_posts = _fetch_existing_posts_snapshot(limit=80)
     existing_post_titles = [item.get("title", "") for item in existing_posts]
@@ -136,9 +145,17 @@ def refresh_idea_backlog(
     index["updated_at"] = now.isoformat()
     index["last_refresh_at"] = now.isoformat()
 
-    _save_idea_index(index)
-    _write_batch_file(now=now, topic=topic, query_plan=query_plan, output_text=output_text, events=events, ideas=new_items)
-    _write_ideas_markdown(index)
+    _save_idea_index(index, agent_name=agent_name)
+    _write_batch_file(
+        agent_name=agent_name,
+        now=now,
+        topic=topic,
+        query_plan=query_plan,
+        output_text=output_text,
+        events=events,
+        ideas=new_items,
+    )
+    _write_ideas_markdown(index, agent_name=agent_name)
 
     return {
         "skipped": False,
@@ -151,11 +168,16 @@ def refresh_idea_backlog(
     }
 
 
-def resolve_topic_from_backlog(*, explicit_topic: str | None, default_topic: str) -> tuple[str, dict[str, Any] | None]:
+def resolve_topic_from_backlog(
+    *,
+    agent_name: str = "blogger",
+    explicit_topic: str | None,
+    default_topic: str,
+) -> tuple[str, dict[str, Any] | None]:
     if isinstance(explicit_topic, str) and explicit_topic.strip():
         return explicit_topic.strip(), None
 
-    index = load_idea_index()
+    index = load_idea_index(agent_name)
     ideas = index.get("ideas", [])
     if not isinstance(ideas, list):
         return default_topic, None
@@ -171,10 +193,7 @@ def resolve_topic_from_backlog(*, explicit_topic: str | None, default_topic: str
         return default_topic, None
 
     new_ideas.sort(
-        key=lambda item: (
-            float(item.get("score") or 0.0),
-            str(item.get("created_at") or ""),
-        ),
+        key=lambda item: (float(item.get("score") or 0.0), str(item.get("created_at") or "")),
         reverse=True,
     )
     picked = new_ideas[0]
@@ -183,8 +202,8 @@ def resolve_topic_from_backlog(*, explicit_topic: str | None, default_topic: str
     picked["last_selected_at"] = picked["updated_at"]
 
     index["updated_at"] = picked["updated_at"]
-    _save_idea_index(index)
-    _write_ideas_markdown(index)
+    _save_idea_index(index, agent_name=agent_name)
+    _write_ideas_markdown(index, agent_name=agent_name)
     return str(picked.get("title") or default_topic), picked
 
 
@@ -203,11 +222,17 @@ def write_selected_idea_artifact(*, run_dir: Path, idea: dict[str, Any] | None) 
     (run_dir / "selected_idea.json").write_text(json.dumps(artifact, indent=2), encoding="utf-8")
 
 
-def update_selected_idea_outcome(*, idea_id: str | None, success: bool, on_failure: str = "new") -> None:
+def update_selected_idea_outcome(
+    *,
+    agent_name: str = "blogger",
+    idea_id: str | None,
+    success: bool,
+    on_failure: str = "new",
+) -> None:
     if not isinstance(idea_id, str) or not idea_id.strip():
         return
 
-    index = load_idea_index()
+    index = load_idea_index(agent_name)
     ideas = index.get("ideas", [])
     if not isinstance(ideas, list):
         return
@@ -233,12 +258,12 @@ def update_selected_idea_outcome(*, idea_id: str | None, success: bool, on_failu
         return
 
     index["updated_at"] = now
-    _save_idea_index(index)
-    _write_ideas_markdown(index)
+    _save_idea_index(index, agent_name=agent_name)
+    _write_ideas_markdown(index, agent_name=agent_name)
 
 
-def manual_select_idea(idea_id: str) -> bool:
-    index = load_idea_index()
+def manual_select_idea(*, agent_name: str = "blogger", idea_id: str) -> bool:
+    index = load_idea_index(agent_name)
     ideas = index.get("ideas", [])
     if not isinstance(ideas, list):
         return False
@@ -261,27 +286,123 @@ def manual_select_idea(idea_id: str) -> bool:
         return False
 
     index["updated_at"] = now
-    _save_idea_index(index)
-    _write_ideas_markdown(index)
+    _save_idea_index(index, agent_name=agent_name)
+    _write_ideas_markdown(index, agent_name=agent_name)
     return True
 
 
-def _save_idea_index(index: dict[str, Any]) -> None:
-    path = blogger_ideas_index_path()
+class IdeaBacklogRefreshHook:
+    hook_type = "idea_backlog_refresh"
+
+    def execute(self, context: HookContext) -> HookResult:
+        cfg = context.hook_config
+        topic = str(context.agent_config.get("topic") or "")
+        out = refresh_idea_backlog(
+            agent_name=context.agent_name,
+            client=context.client,
+            registry=context.registry,
+            model=context.model,
+            topic=topic,
+            count=int(cfg.get("refresh_count", 6)),
+            query_count=int(cfg.get("query_count", 8)),
+            max_iterations=int(cfg.get("max_iterations", 14)),
+            prefer_web=bool(cfg.get("prefer_web", True)),
+            min_refresh_interval_minutes=int(cfg.get("min_refresh_interval_minutes", 180)),
+        )
+        return HookResult(ok=True, data=out)
+
+
+class IdeaBacklogSelectHook:
+    hook_type = "idea_backlog_select"
+
+    def execute(self, context: HookContext) -> HookResult:
+        explicit = context.agent_config.get("topic_override")
+        default_topic = str(context.agent_config.get("topic") or "Latest AI news")
+        topic, selected = resolve_topic_from_backlog(
+            agent_name=context.agent_name,
+            explicit_topic=str(explicit) if isinstance(explicit, str) else None,
+            default_topic=default_topic,
+        )
+        if context.run_dir is not None and selected is not None:
+            write_selected_idea_artifact(run_dir=context.run_dir, idea=selected)
+        selected_id = str(selected.get("id") or "") if isinstance(selected, dict) else ""
+        return HookResult(ok=True, data={"topic": topic, "selected_idea_id": selected_id or None})
+
+
+class IdeaBacklogOutcomeHook:
+    hook_type = "idea_backlog_outcome"
+
+    def execute(self, context: HookContext) -> HookResult:
+        result = context.result if isinstance(context.result, dict) else {}
+        success = str(result.get("status") or "") == "completed"
+        selected_path = (context.run_dir / "selected_idea.json") if context.run_dir is not None else None
+        selected_id: str | None = None
+        if selected_path is not None and selected_path.exists():
+            try:
+                selected = json.loads(selected_path.read_text(encoding="utf-8"))
+                if isinstance(selected, dict):
+                    selected_id = str(selected.get("id") or "") or None
+            except Exception:
+                selected_id = None
+
+        on_failure = str(context.hook_config.get("failure_selected_action", "new"))
+        update_selected_idea_outcome(
+            agent_name=context.agent_name,
+            idea_id=selected_id,
+            success=success,
+            on_failure=on_failure,
+        )
+        return HookResult(ok=True, data={"updated": bool(selected_id)})
+
+
+# CLI helper functions for dynamic action handlers.
+def cli_refresh(
+    *,
+    agent_name: str,
+    client: BaseLLMClient,
+    registry: ToolRegistry,
+    model: str,
+    args: dict[str, Any],
+    **_: Any,
+) -> dict[str, Any]:
+    return refresh_idea_backlog(
+        agent_name=agent_name,
+        client=client,
+        registry=registry,
+        model=model,
+        topic=str(args.get("topic") or "Latest AI news"),
+        count=int(args.get("count", 6)),
+        query_count=int(args.get("query_count", 8)),
+        max_iterations=int(args.get("max_iterations", 14)),
+        prefer_web=bool(args.get("prefer_web", True)),
+        force=bool(args.get("force", False)),
+        min_refresh_interval_minutes=int(args.get("min_refresh_interval_minutes", 180)),
+    )
+
+
+def cli_list(*, agent_name: str, args: dict[str, Any], **_: Any) -> list[dict[str, Any]]:
+    return list_ideas(agent_name=agent_name, status=args.get("status"), limit=int(args.get("limit", 20)))
+
+
+def cli_select(*, agent_name: str, args: dict[str, Any], **_: Any) -> dict[str, Any]:
+    idea_id = str(args.get("id") or "").strip()
+    if not idea_id:
+        return {"ok": False, "error": "Missing --arg id=<idea_id>"}
+    ok = manual_select_idea(agent_name=agent_name, idea_id=idea_id)
+    return {"ok": ok, "id": idea_id}
+
+
+def _save_idea_index(index: dict[str, Any], *, agent_name: str) -> None:
+    path = _ideas_index_path(agent_name)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(index, indent=2), encoding="utf-8")
 
 
-def _write_ideas_markdown(index: dict[str, Any]) -> None:
+def _write_ideas_markdown(index: dict[str, Any], *, agent_name: str) -> None:
     ideas = [item for item in index.get("ideas", []) if isinstance(item, dict)]
     ideas.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
 
-    lines: list[str] = [
-        "# Blogger Ideas Backlog",
-        "",
-        f"Updated: {index.get('updated_at') or ''}",
-        "",
-    ]
+    lines: list[str] = ["# Blogger Ideas Backlog", "", f"Updated: {index.get('updated_at') or ''}", ""]
 
     for status in ("selected", "new", "used", "archived"):
         lines.append(f"## {status.title()}")
@@ -304,13 +425,14 @@ def _write_ideas_markdown(index: dict[str, Any]) -> None:
                 lines.append(f"  sources: {len(urls)}")
         lines.append("")
 
-    path = blogger_ideas_markdown_path()
+    path = _ideas_markdown_path(agent_name)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
 
 
 def _write_batch_file(
     *,
+    agent_name: str,
     now: datetime,
     topic: str,
     query_plan: list[str],
@@ -318,7 +440,7 @@ def _write_batch_file(
     events: list[dict[str, Any]],
     ideas: list[dict[str, Any]],
 ) -> None:
-    batch_dir = blogger_ideas_batches_dir()
+    batch_dir = _ideas_batches_dir(agent_name)
     batch_dir.mkdir(parents=True, exist_ok=True)
     batch_path = batch_dir / f"{now.strftime('%Y%m%d-%H%M%S')}.md"
 
@@ -369,7 +491,7 @@ def _build_user_prompt(
         [
             "",
             "Output JSON only with this shape:",
-            "{\"ideas\": [{\"title\": \"...\", \"angle\": \"...\", \"audience\": \"...\", \"outline\": [\"...\"], \"reasoning_summary\": \"...\", \"source_urls\": [\"https://...\"], \"score\": 0.0, \"tags\": [\"...\"]}]}",
+            '{"ideas": [{"title": "...", "angle": "...", "audience": "...", "outline": ["..."], "reasoning_summary": "...", "source_urls": ["https://..."], "score": 0.0, "tags": ["..."]}]}',
             "",
             "Constraints:",
             "- Use concrete timely titles, not generic themes.",
@@ -454,8 +576,8 @@ def _extract_ideas(text: str) -> list[dict[str, Any]]:
 
 def _extract_json_payload(text: str) -> Any:
     stripped = text.strip()
-    stripped = re.sub(r"^```(?:json)?\s*", "", stripped)
-    stripped = re.sub(r"\s*```$", "", stripped)
+    stripped = re.sub(r"^```(?:json)?\\s*", "", stripped)
+    stripped = re.sub(r"\\s*```$", "", stripped)
 
     for candidate in (stripped,):
         try:

@@ -4,6 +4,8 @@ import sys
 import time
 import subprocess
 import webbrowser
+import importlib
+from pathlib import Path
 from typing import Any, Optional
 import json
 import urllib.parse
@@ -38,14 +40,12 @@ llm_app = typer.Typer(help="LLM provider diagnostics")
 mcp_app = typer.Typer(help="MCP integrations")
 wordpress_app = typer.Typer(help="WordPress integrations (REST)")
 agent_app = typer.Typer(help="Persistent agent management")
-blogger_app = typer.Typer(help="Autonomous blogging agent")
 app.add_typer(github_app, name="github")
 app.add_typer(ollama_app, name="ollama")
 app.add_typer(llm_app, name="llm")
 app.add_typer(mcp_app, name="mcp")
 app.add_typer(wordpress_app, name="wordpress")
 app.add_typer(agent_app, name="agent")
-agent_app.add_typer(blogger_app, name="blogger")
 
 RICH_CONSOLE = Console()
 THINK_OPEN_MARKERS = (
@@ -1363,414 +1363,308 @@ def mcp_connect() -> None:
     typer.echo("Deprecated. Use 'thistlebot mcp status' and 'thistlebot mcp tools'.")
 
 
-# ---------------------------------------------------------------------------
-# Agent: Blogger
-# ---------------------------------------------------------------------------
+@agent_app.command("list")
+def agent_list() -> None:
+    """List discoverable agents (directories with agent.json)."""
+    from .agents.registry import discover_agents
+
+    agents = discover_agents()
+    if not agents:
+        typer.echo("No agents found.")
+        return
+    for item in agents:
+        typer.echo(f"{item.name}\t{item.description()}")
 
 
-@blogger_app.command("run")
-def blogger_run(
-    topic: Optional[str] = typer.Option(None, "--topic", help="Override the configured topic"),
-    status: Optional[str] = typer.Option(None, "--status", help="WordPress post status (draft/publish)"),
+@agent_app.command("run")
+def agent_run(
+    name: str = typer.Argument(..., help="Agent name"),
+    workflow: Optional[str] = typer.Option(None, "--workflow", help="Workflow id override"),
+    topic: Optional[str] = typer.Option(None, "--topic", help="Topic override for this run"),
+    status: Optional[str] = typer.Option(None, "--status", help="WordPress status override (draft/publish)"),
 ) -> None:
-    """Execute one blogger workflow: research, draft, and publish."""
-    from .agents.blogger.workflow import run_publish_workflow
+    from .agents.workflow import run_agent_workflow
 
-    console = RICH_CONSOLE
+    config_overrides: dict[str, Any] = {}
+    if topic is not None:
+        config_overrides["topic_override"] = topic
+    if status is not None:
+        config_overrides["post_status"] = status
 
     def _on_step(step_name: str, step_status: str) -> None:
         if step_status == "started":
-            console.print(f"[cyan]>> Step: {step_name}...[/cyan]")
+            RICH_CONSOLE.print(f"[cyan]>> Step: {step_name}...[/cyan]")
         elif step_status == "completed":
-            console.print(f"[green]   {step_name} completed.[/green]")
-
-    console.print("[bold]Blogger agent — running publish workflow[/bold]")
+            RICH_CONSOLE.print(f"[green]   {step_name} completed.[/green]")
 
     try:
-        result = run_publish_workflow(
-            topic_override=topic,
-            status_override=status,
+        result = run_agent_workflow(
+            name,
+            workflow_name=workflow,
+            config_overrides=config_overrides or None,
             on_step=_on_step,
         )
     except Exception as exc:
-        console.print(f"[red]Workflow failed: {exc}[/red]")
+        RICH_CONSOLE.print(f"[red]Agent run failed: {exc}[/red]")
         raise typer.Exit(code=1)
 
-    console.print()
-    console.print(f"[bold green]Workflow completed![/bold green]")
-    console.print(f"  Run dir: {result['run_dir']}")
-    console.print(f"  Topic:   {result['topic']}")
-    console.print(f"  Status:  {result['post_status']}")
-    console.print(f"  Model:   {result['model']}")
-    if result.get("selected_idea_id"):
-        console.print(f"  Idea:    {result['selected_idea_id']}")
-    ideas_refresh = result.get("ideas_refresh")
-    if isinstance(ideas_refresh, dict):
-        if ideas_refresh.get("skipped"):
-            console.print(f"  Idea refresh: skipped ({ideas_refresh.get('reason', 'n/a')})")
-        else:
-            console.print(
-                "  Idea refresh: "
-                f"created={ideas_refresh.get('created_count', 0)} "
-                f"web_calls={ideas_refresh.get('web_tool_calls', 0)}"
-            )
-
-    # Show final summary from the publish step
-    from pathlib import Path
-
-    final_path = Path(result["run_dir"]) / "final.md"
+    RICH_CONSOLE.print("[bold green]Workflow completed[/bold green]")
+    RICH_CONSOLE.print(f"  Agent:    {result.get('agent')}")
+    RICH_CONSOLE.print(f"  Workflow: {result.get('workflow')}")
+    RICH_CONSOLE.print(f"  Run dir:  {result.get('run_dir')}")
+    RICH_CONSOLE.print(f"  Status:   {result.get('status')}")
+    final_path = Path(str(result.get("run_dir"))) / "final.md"
     if final_path.exists():
-        console.print()
-        console.print("[bold]Publish summary:[/bold]")
-        console.print(final_path.read_text(encoding="utf-8")[:2000])
+        RICH_CONSOLE.print("[bold]Final summary:[/bold]")
+        RICH_CONSOLE.print(final_path.read_text(encoding="utf-8")[:2000])
 
 
-@blogger_app.command("status")
-def blogger_status(
+@agent_app.command("status")
+def agent_status(
+    name: str = typer.Argument(..., help="Agent name"),
     limit: int = typer.Option(5, "--limit", "-n", help="Number of recent runs to show"),
 ) -> None:
-    """Show recent blogger workflow runs."""
-    from .agents.blogger.config import list_runs, load_blogger_config
+    from .agents.config import list_runs, load_agent_config
+    from .agents.loader import load_agent_definition
     from .agents.memory import JsonFileMemoryStore
     from .agents.runner import is_agent_daemon_running, read_agent_state
 
-    console = RICH_CONSOLE
-    blogger_cfg = load_blogger_config()
-    daemon_state = read_agent_state("blogger")
-    daemon_running = is_agent_daemon_running("blogger")
-    memory_store = JsonFileMemoryStore("blogger")
+    agent_def = load_agent_definition(name)
+    cfg = load_agent_config(name, agent_def)
+    daemon_state = read_agent_state(name)
+    daemon_running = is_agent_daemon_running(name)
+    memory_store = JsonFileMemoryStore(name)
 
-    console.print(f"[bold]Blogger agent[/bold]")
-    console.print(f"  Site:  {blogger_cfg.get('site', 'not configured')}")
-    console.print(f"  Topic: {blogger_cfg.get('topic', 'not configured')}")
-    console.print(f"  Daemon running: {daemon_running}")
+    RICH_CONSOLE.print(f"[bold]{name} agent[/bold]")
+    RICH_CONSOLE.print(f"  Site:  {cfg.get('site', 'not configured')}")
+    RICH_CONSOLE.print(f"  Topic: {cfg.get('topic', 'not configured')}")
+    RICH_CONSOLE.print(f"  Daemon running: {daemon_running}")
     if daemon_state:
-        console.print(f"  Last run at:   {daemon_state.get('last_run_at') or 'n/a'}")
-        console.print(f"  Next run at:   {daemon_state.get('next_run_at') or 'n/a'}")
-        console.print(f"  Last status:   {daemon_state.get('last_run_status') or 'n/a'}")
+        RICH_CONSOLE.print(f"  Last run at:   {daemon_state.get('last_run_at') or 'n/a'}")
+        RICH_CONSOLE.print(f"  Next run at:   {daemon_state.get('next_run_at') or 'n/a'}")
+        RICH_CONSOLE.print(f"  Last status:   {daemon_state.get('last_run_status') or 'n/a'}")
         if daemon_state.get("last_error"):
-            console.print(f"  Last error:    {daemon_state.get('last_error')}")
-    console.print()
+            RICH_CONSOLE.print(f"  Last error:    {daemon_state.get('last_error')}")
 
-    runs = list_runs()
+    runs = list_runs(name)
     if not runs:
-        console.print("No runs found.")
+        RICH_CONSOLE.print("No runs found.")
         return
 
-    console.print(f"[bold]Recent runs (latest {limit}):[/bold]")
+    RICH_CONSOLE.print(f"[bold]Recent runs (latest {limit}):[/bold]")
     for run_dir in runs[:limit]:
         meta_path = run_dir / "meta.json"
         if meta_path.exists():
-            import json
-
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
-            run_status = meta.get("status", "unknown")
-            steps = meta.get("steps", {})
-            ts = meta.get("timestamp", "")
-            console.print(f"  {run_dir.name}  status={run_status}  steps={steps}  ts={ts}")
+            RICH_CONSOLE.print(
+                f"  {run_dir.name} status={meta.get('status','unknown')} steps={meta.get('steps',{})} ts={meta.get('timestamp','')}"
+            )
         else:
-            # Infer status from which files exist
             files = [f.name for f in run_dir.iterdir() if f.is_file()]
-            console.print(f"  {run_dir.name}  files={files}")
+            RICH_CONSOLE.print(f"  {run_dir.name} files={files}")
 
     recent_memories = memory_store.list_recent(limit=limit)
     if recent_memories:
-        console.print()
-        console.print(f"[bold]Recent memory summaries (latest {limit}):[/bold]")
+        RICH_CONSOLE.print(f"[bold]Recent memory summaries (latest {limit}):[/bold]")
         for entry in recent_memories:
-            console.print(
-                f"  {entry.timestamp}  {entry.type}  run={entry.run_id or '-'}  {entry.summary[:120]}"
-            )
+            RICH_CONSOLE.print(f"  {entry.timestamp} {entry.type} run={entry.run_id or '-'} {entry.summary[:120]}")
 
 
-@blogger_app.command("config")
-def blogger_config_show() -> None:
-    """Show current blogger configuration."""
-    from .agents.blogger.config import load_blogger_config
+@agent_app.command("config")
+def agent_config_show(name: str = typer.Argument(..., help="Agent name")) -> None:
+    from .agents.config import load_agent_config
+    from .agents.loader import load_agent_definition
 
-    import json
+    agent_def = load_agent_definition(name)
+    cfg = load_agent_config(name, agent_def)
+    RICH_CONSOLE.print_json(json.dumps(cfg, indent=2, default=str))
 
-    cfg = load_blogger_config()
-    RICH_CONSOLE.print_json(json.dumps(cfg, indent=2))
 
-
-@blogger_app.command("setup")
-def blogger_setup(
-    site: Optional[str] = typer.Option(None, "--site", help="WordPress site, e.g. your-site.wordpress.com"),
-    topic: Optional[str] = typer.Option(None, "--topic", help="Default topic focus"),
-    post_status: str = typer.Option("draft", "--post-status", help="Default post status (draft/publish)"),
-    schedule_enabled: bool = typer.Option(False, "--schedule-enabled", help="Enable scheduled daemon runs"),
-    cron: str = typer.Option("0 9,21 * * *", "--cron", help="Cron expression for scheduled runs"),
-    timezone: str = typer.Option("UTC", "--timezone", help="Scheduler timezone"),
-    yes: bool = typer.Option(False, "--yes", "-y", help="Skip interactive prompts and use provided/default values"),
+@agent_app.command("setup")
+def agent_setup(
+    name: str = typer.Argument(..., help="Agent name"),
+    site: Optional[str] = typer.Option(None, "--site", help="WordPress site to store in agent .env"),
+    topic: Optional[str] = typer.Option(None, "--topic", help="Default topic to store in agent .env"),
+    post_status: Optional[str] = typer.Option(None, "--post-status", help="Default post status to store in agent .env"),
 ) -> None:
-    """Interactive setup for the blogger agent runtime config."""
-    from .agents.blogger.config import DEFAULT_BLOGGER_CONFIG, blogger_config_path, load_blogger_config
+    from .agents.config import runtime_agent_dir
 
-    cfg = load_config()
-    wp_cfg = cfg.get("wordpress", {}) if isinstance(cfg.get("wordpress"), dict) else {}
-    wp_token = str(wp_cfg.get("token") or "").strip()
-    wp_site = str(wp_cfg.get("blog") or "").strip()
+    agent_token = name.replace("-", "_").upper()
+    env_path = runtime_agent_dir(name) / ".env"
+    env_path.parent.mkdir(parents=True, exist_ok=True)
 
-    if not wp_token:
-        typer.echo("WordPress token missing. Run 'thistlebot wordpress login' first.", err=True)
+    lines: list[str] = []
+    if env_path.exists():
+        lines = env_path.read_text(encoding="utf-8").splitlines()
+
+    updates: dict[str, str] = {}
+    if site is not None:
+        updates[f"THISTLEBOT_AGENT_{agent_token}_SITE"] = site
+    if topic is not None:
+        updates[f"THISTLEBOT_AGENT_{agent_token}_TOPIC"] = topic
+    if post_status is not None:
+        updates[f"THISTLEBOT_AGENT_{agent_token}_POST_STATUS"] = post_status
+
+    if not updates:
+        typer.echo("No values provided. Use --site/--topic/--post-status.")
         raise typer.Exit(code=1)
 
-    existing = load_blogger_config()
-    selected_site = site or (existing.get("site") if isinstance(existing.get("site"), str) else None) or wp_site
-    default_topic = topic or str(existing.get("topic") or DEFAULT_BLOGGER_CONFIG.get("topic") or "Latest AI news")
+    kept: list[str] = []
+    for line in lines:
+        key = line.split("=", 1)[0].strip()
+        if key in updates:
+            continue
+        kept.append(line)
+    for key, value in updates.items():
+        kept.append(f"{key}={value}")
 
-    if not yes:
-        if not selected_site:
-            selected_site = typer.prompt("WordPress site", default=wp_site or "your-site.wordpress.com").strip()
-        default_topic = typer.prompt("Default topic", default=default_topic).strip()
-        post_status = typer.prompt("Default post status", default=post_status).strip().lower() or "draft"
-        schedule_enabled = typer.confirm("Enable scheduled blogger runs?", default=schedule_enabled)
-        if schedule_enabled:
-            cron = typer.prompt("Schedule cron", default=cron).strip()
-            timezone = typer.prompt("Schedule timezone", default=timezone).strip()
-
-    if not selected_site:
-        typer.echo("Unable to determine WordPress site. Provide --site or set wordpress.blog.", err=True)
-        raise typer.Exit(code=1)
-
-    if post_status not in {"draft", "publish"}:
-        typer.echo("--post-status must be either 'draft' or 'publish'.", err=True)
-        raise typer.Exit(code=1)
-
-    merged = dict(DEFAULT_BLOGGER_CONFIG)
-    if isinstance(existing, dict):
-        merged.update(existing)
-
-    merged["site"] = selected_site
-    merged["topic"] = default_topic or "Latest AI news"
-    merged["post_status"] = post_status
-
-    schedule_cfg = merged.get("schedule") if isinstance(merged.get("schedule"), dict) else {}
-    schedule_cfg = dict(schedule_cfg)
-    schedule_cfg["enabled"] = bool(schedule_enabled)
-    schedule_cfg["cron"] = cron
-    schedule_cfg["timezone"] = timezone
-    merged["schedule"] = schedule_cfg
-
-    path = blogger_config_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(merged, indent=2), encoding="utf-8")
-
-    typer.echo("Blogger setup complete.")
-    typer.echo(f"Config: {path}")
-    typer.echo(f"Site: {selected_site}")
-    typer.echo(f"Topic: {merged['topic']}")
-    typer.echo(f"Default status: {post_status}")
-    if schedule_enabled:
-        typer.echo(f"Schedule: {cron} ({timezone})")
-
-    typer.echo("Next steps:")
-    typer.echo("  1) thistlebot agent blogger run --status draft")
-    typer.echo("  2) thistlebot agent blogger start   # if schedule enabled")
+    env_path.write_text("\n".join(kept).strip() + "\n", encoding="utf-8")
+    typer.echo(f"Updated {env_path}")
 
 
-@blogger_app.command("ideas-refresh")
-def blogger_ideas_refresh(
-    topic: Optional[str] = typer.Option(None, "--topic", help="Topic to scout ideas for"),
-    count: Optional[int] = typer.Option(None, "--count", help="Number of ideas to request"),
-    force: bool = typer.Option(False, "--force", help="Ignore minimum refresh interval"),
-) -> None:
-    """Run the idea discovery refresh workflow and update backlog files."""
-    from .agents.blogger.config import load_blogger_config
-    from .agents.blogger.ideas import refresh_idea_backlog
-    from .core.tools.registry import build_tool_registry
-    from .integrations.mcp.registry import build_mcp_registry
-    from .llm.factory import build_llm_client, get_default_model
-    from .storage.state import load_config
-
-    cfg = load_config()
-    blogger_cfg = load_blogger_config()
-    ideas_cfg = blogger_cfg.get("ideas", {}) if isinstance(blogger_cfg.get("ideas"), dict) else {}
-
-    client = build_llm_client(cfg)
-    model = get_default_model(cfg)
-    mcp_registry = build_mcp_registry(cfg) if cfg.get("mcp", {}).get("enabled") else None
-    registry = build_tool_registry(cfg, mcp_registry)
-
-    target_topic = topic or str(blogger_cfg.get("topic") or "")
-    refresh_count = int(count if count is not None else ideas_cfg.get("refresh_count", 6))
-
-    result = refresh_idea_backlog(
-        client=client,
-        registry=registry,
-        model=model,
-        topic=target_topic,
-        count=refresh_count,
-        query_count=int(ideas_cfg.get("query_count", 8)),
-        max_iterations=int(ideas_cfg.get("max_iterations", 14)),
-        prefer_web=bool(ideas_cfg.get("prefer_web", True)),
-        force=force,
-        min_refresh_interval_minutes=int(ideas_cfg.get("min_refresh_interval_minutes", 180)),
-    )
-
-    console = RICH_CONSOLE
-    if result.get("skipped"):
-        console.print(f"[yellow]Idea refresh skipped:[/yellow] {result.get('reason', 'n/a')}")
-        return
-    console.print("[green]Idea refresh completed.[/green]")
-    console.print(f"  Created ideas: {result.get('created_count', 0)}")
-    console.print(f"  Total ideas:   {result.get('total_ideas', 0)}")
-    console.print(f"  Web calls:     {result.get('web_tool_calls', 0)}")
-
-
-@blogger_app.command("ideas-list")
-def blogger_ideas_list(
-    status: Optional[str] = typer.Option(None, "--status", help="Filter by status: new|selected|used|archived"),
-    limit: int = typer.Option(15, "--limit", "-n", help="Maximum number of ideas"),
-) -> None:
-    """List ideas currently tracked in the blogger backlog."""
-    from .agents.blogger.ideas import list_ideas
-
-    ideas = list_ideas(status=status, limit=limit)
-    console = RICH_CONSOLE
-    if not ideas:
-        console.print("No ideas found.")
-        return
-
-    for item in ideas:
-        console.print(
-            f"- {item.get('id')}  [{item.get('status')}]  score={item.get('score')}  {item.get('title')}",
-            markup=False,
-        )
-
-
-@blogger_app.command("ideas-select")
-def blogger_ideas_select(
-    idea_id: str = typer.Option(..., "--id", help="Idea id to mark as selected"),
-) -> None:
-    """Mark one idea as selected for the next automatic publish run."""
-    from .agents.blogger.ideas import manual_select_idea
-
-    ok = manual_select_idea(idea_id)
-    if not ok:
-        typer.echo(f"Idea not found: {idea_id}", err=True)
-        raise typer.Exit(code=1)
-    typer.echo(f"Selected idea: {idea_id}")
-
-
-@blogger_app.command("retry-publish")
-def blogger_retry_publish(
-    run_id: Optional[str] = typer.Option(None, "--run-id", help="Run directory id to retry (defaults to latest)"),
-    status: Optional[str] = typer.Option(None, "--status", help="WordPress post status override (draft/publish)"),
-) -> None:
-    """Retry only the publish step for an existing run using saved draft artifacts."""
-    from .agents.blogger.workflow import retry_publish_from_run
-
-    console = RICH_CONSOLE
-
-    def _on_step(step_name: str, step_status: str) -> None:
-        if step_status == "started":
-            console.print(f"[cyan]>> Step: {step_name}...[/cyan]")
-        elif step_status == "completed":
-            console.print(f"[green]   {step_name} completed.[/green]")
-
-    console.print("[bold]Blogger agent — retry publish[/bold]")
-    if run_id:
-        console.print(f"  Run id: {run_id}")
-
-    try:
-        result = retry_publish_from_run(
-            run_id=run_id,
-            status_override=status,
-            on_step=_on_step,
-        )
-    except Exception as exc:
-        console.print(f"[red]Retry publish failed: {exc}[/red]")
-        raise typer.Exit(code=1)
-
-    console.print()
-    console.print("[bold green]Retry publish completed![/bold green]")
-    console.print(f"  Run dir: {result['run_dir']}")
-    console.print(f"  Status:  {result['post_status']}")
-
-    from pathlib import Path
-
-    final_path = Path(result["run_dir"]) / "final.md"
-    if final_path.exists():
-        console.print()
-        console.print("[bold]Publish summary:[/bold]")
-        console.print(final_path.read_text(encoding="utf-8")[:2000])
-
-
-@blogger_app.command("start")
-def blogger_start(
+@agent_app.command("start")
+def agent_start(
+    name: str = typer.Argument(..., help="Agent name"),
     foreground: bool = typer.Option(False, "--foreground", help="Run in foreground (blocks terminal)"),
 ) -> None:
-    """Start the blogger daemon scheduler."""
-    from .agents.blogger.config import load_blogger_config
+    from .agents.loader import load_agent_definition
     from .agents.runner import AgentDaemon, is_agent_daemon_running
+    from .agents.workflow import run_agent_workflow
     from .storage.paths import agent_log_path
 
-    cfg = load_blogger_config()
-    schedule_cfg = cfg.get("schedule", {}) if isinstance(cfg.get("schedule"), dict) else {}
-
+    agent_def = load_agent_definition(name)
+    schedule_cfg = agent_def.schedule()
     if not bool(schedule_cfg.get("enabled", False)):
-        typer.echo("Blogger schedule is disabled in config (set schedule.enabled=true).", err=True)
+        typer.echo("Schedule is disabled for this agent in agent.json.", err=True)
         raise typer.Exit(code=1)
 
-    if is_agent_daemon_running("blogger"):
-        typer.echo("Blogger daemon is already running.")
+    if is_agent_daemon_running(name):
+        typer.echo(f"{name} daemon is already running.")
         raise typer.Exit(code=0)
 
     if foreground:
-        from .agents.blogger.workflow import run_publish_workflow
-
-        daemon = AgentDaemon(
-            agent_name="blogger",
-            schedule_config=schedule_cfg,
-            run_once=lambda: run_publish_workflow(),
-        )
-        typer.echo("Starting blogger daemon in foreground. Press Ctrl+C to stop.")
+        daemon = AgentDaemon(agent_name=name, schedule_config=schedule_cfg, run_once=lambda: run_agent_workflow(name))
+        typer.echo(f"Starting {name} daemon in foreground. Press Ctrl+C to stop.")
         daemon.run_forever()
         return
 
-    log_path = agent_log_path("blogger")
+    log_path = agent_log_path(name)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("a", encoding="utf-8") as log_fh:
         subprocess.Popen(  # noqa: S603
-            [sys.executable, "-m", "thistlebot", "agent", "blogger", "daemon-run"],
+            [sys.executable, "-m", "thistlebot", "agent", "daemon-run", name],
             stdout=log_fh,
             stderr=log_fh,
             start_new_session=True,
         )
-
-    typer.echo("Blogger daemon start requested.")
+    typer.echo(f"{name} daemon start requested.")
     typer.echo(f"Log file: {log_path}")
 
 
-@blogger_app.command("stop")
-def blogger_stop() -> None:
-    """Stop the blogger daemon scheduler."""
+@agent_app.command("stop")
+def agent_stop(name: str = typer.Argument(..., help="Agent name")) -> None:
     from .agents.runner import stop_agent_daemon
 
-    ok = stop_agent_daemon("blogger")
+    ok = stop_agent_daemon(name)
     if not ok:
-        typer.echo("No running blogger daemon found.")
+        typer.echo(f"No running daemon found for {name}.")
         raise typer.Exit(code=1)
-    typer.echo("Stop signal sent to blogger daemon.")
+    typer.echo(f"Stop signal sent to {name} daemon.")
 
 
-@blogger_app.command("daemon-run", hidden=True)
-def blogger_daemon_run() -> None:
-    """Internal command used by `blogger start` background process."""
-    from .agents.blogger.config import load_blogger_config
-    from .agents.blogger.workflow import run_publish_workflow
+@agent_app.command("daemon-run", hidden=True)
+def agent_daemon_run(name: str = typer.Argument(..., help="Agent name")) -> None:
+    from .agents.loader import load_agent_definition
     from .agents.runner import AgentDaemon
+    from .agents.workflow import run_agent_workflow
 
-    cfg = load_blogger_config()
-    schedule_cfg = cfg.get("schedule", {}) if isinstance(cfg.get("schedule"), dict) else {}
-    daemon = AgentDaemon(
-        agent_name="blogger",
-        schedule_config=schedule_cfg,
-        run_once=lambda: run_publish_workflow(),
-    )
+    schedule_cfg = load_agent_definition(name).schedule()
+    daemon = AgentDaemon(agent_name=name, schedule_config=schedule_cfg, run_once=lambda: run_agent_workflow(name))
     daemon.run_forever()
+
+
+@agent_app.command("retry")
+def agent_retry(
+    name: str = typer.Argument(..., help="Agent name"),
+    step_id: str = typer.Argument(..., help="Step id to retry"),
+    run_id: Optional[str] = typer.Option(None, "--run-id", help="Run id to retry from (latest if omitted)"),
+    status: Optional[str] = typer.Option(None, "--status", help="WordPress status override (draft/publish)"),
+) -> None:
+    from .agents.workflow import retry_step_from_run
+
+    overrides: dict[str, Any] = {}
+    if status is not None:
+        overrides["post_status"] = status
+
+    def _on_step(step_name: str, step_status: str) -> None:
+        if step_status == "started":
+            RICH_CONSOLE.print(f"[cyan]>> Step: {step_name}...[/cyan]")
+        elif step_status == "completed":
+            RICH_CONSOLE.print(f"[green]   {step_name} completed.[/green]")
+
+    try:
+        result = retry_step_from_run(
+            name,
+            step_id,
+            run_id=run_id,
+            config_overrides=overrides or None,
+            on_step=_on_step,
+        )
+    except Exception as exc:
+        RICH_CONSOLE.print(f"[red]Retry failed: {exc}[/red]")
+        raise typer.Exit(code=1)
+
+    RICH_CONSOLE.print("[bold green]Retry completed[/bold green]")
+    RICH_CONSOLE.print(f"  Agent:   {result.get('agent')}")
+    RICH_CONSOLE.print(f"  Run dir: {result.get('run_dir')}")
+    RICH_CONSOLE.print(f"  Status:  {result.get('status')}")
+
+
+@agent_app.command("action")
+def agent_action(
+    name: str = typer.Argument(..., help="Agent name"),
+    action: str = typer.Argument(..., help="Action name from agent.json actions"),
+    arg: list[str] = typer.Option([], "--arg", help="Action args in key=value format. Repeat flag for multiple."),
+) -> None:
+    from .agents.loader import load_agent_definition
+    from .core.tools.registry import build_tool_registry
+    from .integrations.mcp.registry import build_mcp_registry
+    from .llm.factory import build_llm_client, get_default_model
+
+    agent_def = load_agent_definition(name)
+    actions = agent_def.actions()
+    action_def = actions.get(action) if isinstance(actions, dict) else None
+    if not isinstance(action_def, dict):
+        typer.echo(f"Unknown action '{action}' for agent '{name}'.", err=True)
+        raise typer.Exit(code=1)
+
+    handler_ref = action_def.get("handler")
+    if not isinstance(handler_ref, str) or ":" not in handler_ref:
+        typer.echo("Invalid action handler in agent.json", err=True)
+        raise typer.Exit(code=1)
+    module_name, func_name = handler_ref.split(":", 1)
+    module = importlib.import_module(f"thistlebot.agents.{name}.{module_name}")
+    handler = getattr(module, func_name, None)
+    if not callable(handler):
+        typer.echo("Action handler is not callable", err=True)
+        raise typer.Exit(code=1)
+
+    args_dict: dict[str, Any] = {}
+    for item in arg:
+        if "=" not in item:
+            typer.echo(f"Invalid --arg '{item}', expected key=value", err=True)
+            raise typer.Exit(code=1)
+        key, value = item.split("=", 1)
+        args_dict[key.strip()] = value.strip()
+
+    cfg = load_config()
+    client = build_llm_client(cfg)
+    model = get_default_model(cfg)
+    mcp_registry = build_mcp_registry(cfg) if cfg.get("mcp", {}).get("enabled") else None
+    registry = build_tool_registry(cfg, mcp_registry, tool_spec=agent_def.tools())
+
+    result = handler(agent_name=name, client=client, registry=registry, model=model, args=args_dict)
+    RICH_CONSOLE.print_json(json.dumps(result, indent=2, default=str))
 
 
 if __name__ == "__main__":
