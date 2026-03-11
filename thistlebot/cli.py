@@ -1381,10 +1381,19 @@ def mcp_connect() -> None:
     typer.echo("Deprecated. Use 'thistlebot mcp status' and 'thistlebot mcp tools'.")
 
 
-_TOPIC_TEMPLATES: dict[str, str] = {
-    "ai": "Latest AI news",
-    "politics": "Latest politics news",
-    "finance": "Personal finance and making money",
+_AGENT_TEMPLATES: dict[str, dict[str, str]] = {
+    "ai": {
+        "source_dir": "ai-blogger",
+        "default_topic": "Latest AI news",
+    },
+    "politics": {
+        "source_dir": "politics-blogger",
+        "default_topic": "Latest politics news",
+    },
+    "finance": {
+        "source_dir": "finance-blogger",
+        "default_topic": "Personal finance and making money",
+    },
 }
 
 
@@ -1597,8 +1606,21 @@ def _default_agent_name() -> str:
         index += 1
 
 
+def _template_source_path(template: str) -> Path:
+    template_cfg = _AGENT_TEMPLATES.get(template)
+    if not isinstance(template_cfg, dict):
+        raise RuntimeError(f"Unknown template '{template}'.")
+    source_dir = template_cfg.get("source_dir")
+    if not isinstance(source_dir, str) or not source_dir:
+        raise RuntimeError(f"Template '{template}' has no source directory configured.")
+    source = Path(__file__).resolve().parent / "agents" / "templates" / source_dir
+    if not source.exists() or not source.is_dir():
+        raise RuntimeError(f"Template source not found: {source}")
+    return source
+
+
 def _create_agent_from_template(agent_name: str, template: str) -> None:
-    source = Path(__file__).resolve().parent / "agents" / "blogger"
+    source = _template_source_path(template)
     target = Path(__file__).resolve().parent / "agents" / agent_name
     if target.exists():
         raise RuntimeError(f"Agent '{agent_name}' already exists.")
@@ -1608,11 +1630,13 @@ def _create_agent_from_template(agent_name: str, template: str) -> None:
     manifest["name"] = agent_name
     defaults = manifest.get("config", {}).get("defaults", {})
     if isinstance(defaults, dict):
-        defaults["topic"] = _TOPIC_TEMPLATES.get(template, _TOPIC_TEMPLATES["ai"])
+        template_cfg = _AGENT_TEMPLATES.get(template, _AGENT_TEMPLATES["ai"])
+        defaults["topic"] = template_cfg.get("default_topic", _AGENT_TEMPLATES["ai"]["default_topic"])
+        defaults["topic_template"] = template
         defaults["post_status"] = "draft"
         defaults["publish_mode"] = "draft"
         defaults["enforce_draft_mode"] = True
-    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
 
 
 def _workflow_alias(agent_name: str, value: str | None) -> str:
@@ -1697,7 +1721,7 @@ def _agent_setup_impl(
     chosen_template = (template or "").strip().lower()
     chosen_topic = (topic or "").strip()
     if not chosen_topic:
-        if chosen_template not in _TOPIC_TEMPLATES and not yes:
+        if chosen_template not in _AGENT_TEMPLATES and not yes:
             selected = questionary.select(
                 "Topic template",
                 choices=["ai", "politics", "finance", "custom"],
@@ -1707,7 +1731,8 @@ def _agent_setup_impl(
         if chosen_template == "custom":
             chosen_topic = str(questionary.text("Enter topic", default=str(current.get("topic") or "")).ask() or "").strip()
         else:
-            chosen_topic = _TOPIC_TEMPLATES.get(chosen_template or "ai", _TOPIC_TEMPLATES["ai"])
+            template_cfg = _AGENT_TEMPLATES.get(chosen_template or "ai", _AGENT_TEMPLATES["ai"])
+            chosen_topic = template_cfg.get("default_topic", _AGENT_TEMPLATES["ai"]["default_topic"])
 
     resolved_site = (site or "").strip() or _pick_wordpress_site(config)
     schedule_cfg, schedule_text = ({"enabled": True, "cron": "0 0,6,12,18 * * *", "timezone": "UTC"}, "0 0,6,12,18 * * *")
@@ -1751,7 +1776,7 @@ def agent_create(
     name: Optional[str] = typer.Option(None, "--name", help="Agent name (default: bloggerN)"),
 ) -> None:
     chosen_template = template.strip().lower()
-    if chosen_template not in _TOPIC_TEMPLATES:
+    if chosen_template not in _AGENT_TEMPLATES:
         typer.echo("Invalid --template. Use: ai, politics, finance.", err=True)
         raise typer.Exit(code=1)
 

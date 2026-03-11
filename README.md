@@ -186,6 +186,16 @@ Create a new blogger-style agent instance with defaults:
 thistlebot agent create --template politics --name myblog
 ```
 
+Template sources are full agent skeletons under:
+
+- `thistlebot/agents/templates/ai-blogger/`
+- `thistlebot/agents/templates/politics-blogger/`
+- `thistlebot/agents/templates/finance-blogger/`
+
+Each template contains full framework artifacts (`agent.json`, prompts, workflows,
+hooks, actions), and `agent create` copies those files into a new
+`thistlebot/agents/<name>/` directory.
+
 Zero-arg fast path:
 
 ```bash

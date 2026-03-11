@@ -28,7 +28,7 @@ htmlcov/
 .vscode/
 .idea/
 
-# Markdown (keep README.md)
-*.md
-!README.md
+# Markdown notes at repo root (keep README.md)
+/*.md
+!/README.md
 .env
