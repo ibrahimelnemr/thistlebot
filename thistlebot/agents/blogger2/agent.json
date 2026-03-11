@@ -6,6 +6,8 @@
     "defaults": {
       "topic": "Latest AI news",
       "post_status": "draft",
+      "publish_mode": "draft",
+      "enforce_draft_mode": true,
       "site": null
     },
     "required": ["topic", "site", "post_status"]
@@ -25,8 +27,8 @@
     "verify_pass_token": "VERDICT: PASS"
   },
   "tools": {
-    "native": ["wordpress.rest.*", "wordpress.*"],
-    "mcp": ["open-web-search.*"],
+    "native": ["wordpress.*"],
+    "mcp": ["open-websearch.*"],
     "filesystem": false,
     "exec": false
   },
@@ -41,6 +43,9 @@
   "workflows": {
     "default": "daily_publish",
     "daily_publish": "workflows/daily_publish.json"
+  },
+  "workflow_aliases": {
+    "post": "daily_publish"
   },
   "hooks": {
     "pre_run": [

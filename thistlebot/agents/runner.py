@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..core.agent_runtime import run_tool_agent
+from ..core.tools.base import ToolResult
 from ..core.tools.registry import ToolRegistry
 from ..llm.base import BaseLLMClient
 from ..storage.paths import agent_log_path, agent_state_path
@@ -231,10 +232,14 @@ def _execute_step(
     output_text = ""
     events: list[dict[str, Any]] = []
     step_id = str(step.get("id") or "")
+    step_registry = _StepToolRegistryProxy(
+        base=registry,
+        enforce_draft_mode=_should_enforce_draft_mode(runtime_config),
+    )
     try:
         response = run_tool_agent(
             client=client,
-            registry=registry,
+            registry=step_registry,
             model=model,
             messages=messages,
             max_iterations=max_iterations,
@@ -262,7 +267,7 @@ def _execute_step(
         step=step,
         step_id=step_id,
         resolved_inputs=resolved_inputs,
-        registry=registry,
+        registry=step_registry,
         output_text=output_text,
         events=events,
     )
@@ -448,7 +453,7 @@ def _maybe_required_tool_fallback(
     step: dict[str, Any],
     step_id: str,
     resolved_inputs: dict[str, Any],
-    registry: ToolRegistry,
+    registry: Any,
     output_text: str,
     events: list[dict[str, Any]],
 ) -> tuple[str, list[dict[str, Any]]]:
@@ -497,6 +502,54 @@ def _maybe_required_tool_fallback(
         return summary, events + fallback_events
 
     return output_text, events + fallback_events
+
+
+def _should_enforce_draft_mode(runtime_config: dict[str, Any]) -> bool:
+    enforce_flag = runtime_config.get("enforce_draft_mode")
+    if isinstance(enforce_flag, bool):
+        if not enforce_flag:
+            return False
+    elif isinstance(enforce_flag, str) and enforce_flag.strip().lower() in {"false", "0", "no", "off"}:
+        return False
+
+    publish_mode = str(runtime_config.get("publish_mode") or "draft").strip().lower()
+    return publish_mode != "publish"
+
+
+class _StepToolRegistryProxy:
+    def __init__(self, *, base: ToolRegistry, enforce_draft_mode: bool) -> None:
+        self._base = base
+        self._enforce_draft_mode = enforce_draft_mode
+        self._successful_publish_count = 0
+
+    def list_specs(self) -> list[Any]:
+        return self._base.list_specs()
+
+    def to_model_tools(self) -> list[dict[str, Any]]:
+        return self._base.to_model_tools()
+
+    def list_tool_names(self) -> list[str]:
+        return self._base.list_tool_names()
+
+    def invoke(self, tool_name: str, payload: dict[str, Any]) -> ToolResult:
+        if tool_name != "wordpress.create_post":
+            return self._base.invoke(tool_name, payload)
+
+        if self._successful_publish_count >= 1:
+            return ToolResult(
+                ok=False,
+                content="",
+                error="Publish guard: at most one successful wordpress.create_post call is allowed per step.",
+            )
+
+        call_payload = dict(payload or {})
+        if self._enforce_draft_mode:
+            call_payload["status"] = "draft"
+
+        result = self._base.invoke(tool_name, call_payload)
+        if result.ok:
+            self._successful_publish_count += 1
+        return result
 
 
 def _build_fallback_payload(*, step_id: str, resolved_inputs: dict[str, Any], fallback_spec: dict[str, Any]) -> dict[str, Any]:

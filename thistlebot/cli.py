@@ -4,6 +4,8 @@ import time
 import subprocess
 import webbrowser
 import importlib
+import shutil
+import re
 from pathlib import Path
 from typing import Any, Optional
 import json
@@ -24,9 +26,9 @@ from .integrations.github.oauth import login_with_device_flow, poll_for_token
 from .integrations.mcp.registry import build_mcp_registry
 from .integrations.wordpress.rest_client import WordPressRestClient
 from .integrations.wordpress.rest_oauth import (
-    DEFAULT_REDIRECT_URI as WORDPRESS_REST_DEFAULT_REDIRECT_URI,
-    login_with_authorization_code_flow as wordpress_rest_login_flow,
-    token_expired as wordpress_rest_token_expired,
+    DEFAULT_REDIRECT_URI as WORDPRESS_DEFAULT_REDIRECT_URI,
+    login_with_authorization_code_flow as wordpress_login_flow,
+    token_expired as wordpress_token_expired,
 )
 from .llm.factory import get_default_model, get_llm_provider, get_provider_config, resolve_api_key
 from .llm.openai_compatible_client import OpenAICompatibleClient
@@ -390,38 +392,36 @@ def _extract_sites_from_result(result: dict[str, Any]) -> list[dict[str, Any]]:
     return []
 
 
-def _wordpress_rest_config(config: dict) -> dict[str, Any]:
+def _wordpress_config(config: dict) -> dict[str, Any]:
     cfg = config.get("wordpress", {})
-    if not isinstance(cfg, dict) or not cfg:
-        cfg = config.get("wordpress_rest", {})
     if isinstance(cfg, dict):
         return cfg
     return {}
 
 
-def _wordpress_rest_client(config: dict) -> WordPressRestClient:
-    rest_cfg = _wordpress_rest_config(config)
-    token = rest_cfg.get("token")
+def _wordpress_client(config: dict) -> WordPressRestClient:
+    wp_cfg = _wordpress_config(config)
+    token = wp_cfg.get("token")
     if not isinstance(token, str) or not token:
         raise RuntimeError("WordPress token missing. Run 'thistlebot wordpress login'.")
-    if wordpress_rest_token_expired(rest_cfg):
+    if wordpress_token_expired(wp_cfg):
         raise RuntimeError("WordPress token expired. Run 'thistlebot wordpress login' to refresh it.")
-    timeout = rest_cfg.get("timeout_seconds")
+    timeout = wp_cfg.get("timeout_seconds")
     timeout_value = float(timeout) if isinstance(timeout, (int, float)) else 30.0
     return WordPressRestClient(access_token=token, timeout_seconds=timeout_value)
 
 
-def _wordpress_rest_site_ref(config: dict, explicit_site: str | None) -> str:
+def _wordpress_site_ref(config: dict, explicit_site: str | None) -> str:
     if explicit_site:
         return explicit_site
-    rest_cfg = _wordpress_rest_config(config)
-    blog = rest_cfg.get("blog")
+    wp_cfg = _wordpress_config(config)
+    blog = wp_cfg.get("blog")
     if isinstance(blog, str) and blog.strip():
         return blog.strip()
-    blog_url = rest_cfg.get("blog_url")
+    blog_url = wp_cfg.get("blog_url")
     if isinstance(blog_url, str) and blog_url.strip():
         return blog_url.strip()
-    blog_id = rest_cfg.get("blog_id")
+    blog_id = wp_cfg.get("blog_id")
     if isinstance(blog_id, (int, float)):
         return str(int(blog_id))
     if isinstance(blog_id, str) and blog_id.strip():
@@ -1079,7 +1079,7 @@ def github_repos(
 
 
 @wordpress_app.command("login")
-def wordpress_rest_login(
+def wordpress_login(
     client_id: str = typer.Option("", "--client-id", help="WordPress.com OAuth app client_id"),
     client_secret: str = typer.Option("", "--client-secret", help="WordPress.com OAuth app client_secret"),
     scope: str = typer.Option("posts", "--scope", help="OAuth scope(s), e.g. 'posts media'"),
@@ -1088,23 +1088,23 @@ def wordpress_rest_login(
     callback_timeout: int = typer.Option(240, "--callback-timeout", help="Seconds to wait for browser callback"),
 ) -> None:
     config = load_config()
-    rest_cfg = config.setdefault("wordpress", {})
-    if not isinstance(rest_cfg, dict):
-        rest_cfg = {}
-        config["wordpress"] = rest_cfg
+    wp_cfg = config.setdefault("wordpress", {})
+    if not isinstance(wp_cfg, dict):
+        wp_cfg = {}
+        config["wordpress"] = wp_cfg
 
-    configured_client_id = client_id.strip() or str(rest_cfg.get("client_id") or "")
-    configured_client_secret = client_secret.strip() or str(rest_cfg.get("client_secret") or "")
+    configured_client_id = client_id.strip() or str(wp_cfg.get("client_id") or "")
+    configured_client_secret = client_secret.strip() or str(wp_cfg.get("client_secret") or "")
     if not configured_client_id or not configured_client_secret:
-        typer.echo("WordPress REST login requires --client-id and --client-secret (or stored values).", err=True)
+        typer.echo("WordPress login requires --client-id and --client-secret (or stored values).", err=True)
         raise typer.Exit(code=1)
 
-    redirect_uri = str(rest_cfg.get("redirect_uri") or WORDPRESS_REST_DEFAULT_REDIRECT_URI)
-    selected_blog = blog.strip() or str(rest_cfg.get("blog") or "")
+    redirect_uri = str(wp_cfg.get("redirect_uri") or WORDPRESS_DEFAULT_REDIRECT_URI)
+    selected_blog = blog.strip() or str(wp_cfg.get("blog") or "")
 
-    typer.echo("Starting WordPress REST OAuth login flow...")
+    typer.echo("Starting WordPress OAuth login flow...")
     try:
-        token_data, authorize_url = wordpress_rest_login_flow(
+        token_data, authorize_url = wordpress_login_flow(
             client_id=configured_client_id,
             client_secret=configured_client_secret,
             redirect_uri=redirect_uri,
@@ -1115,64 +1115,63 @@ def wordpress_rest_login(
             blog=selected_blog or None,
         )
     except Exception as exc:
-        typer.echo(f"WordPress REST login failed: {exc}", err=True)
+        typer.echo(f"WordPress login failed: {exc}", err=True)
         raise typer.Exit(code=1)
 
     if not open_browser:
         typer.echo("Open this URL to authorize:")
         typer.echo(authorize_url)
 
-    rest_cfg["enabled"] = True
-    rest_cfg["client_id"] = configured_client_id
-    rest_cfg["client_secret"] = configured_client_secret
-    rest_cfg["redirect_uri"] = redirect_uri
-    rest_cfg["scope"] = token_data.get("scope") or scope
-    rest_cfg["blog"] = selected_blog or None
-    rest_cfg["blog_id"] = token_data.get("blog_id")
-    rest_cfg["blog_url"] = token_data.get("blog_url")
-    rest_cfg["token"] = token_data.get("access_token")
-    rest_cfg["token_type"] = token_data.get("token_type")
-    rest_cfg["expires_in"] = token_data.get("expires_in")
-    rest_cfg["expires_at"] = token_data.get("expires_at")
+    wp_cfg["enabled"] = True
+    wp_cfg["client_id"] = configured_client_id
+    wp_cfg["client_secret"] = configured_client_secret
+    wp_cfg["redirect_uri"] = redirect_uri
+    wp_cfg["scope"] = token_data.get("scope") or scope
+    wp_cfg["blog"] = selected_blog or None
+    wp_cfg["blog_id"] = token_data.get("blog_id")
+    wp_cfg["blog_url"] = token_data.get("blog_url")
+    wp_cfg["token"] = token_data.get("access_token")
+    wp_cfg["token_type"] = token_data.get("token_type")
+    wp_cfg["expires_in"] = token_data.get("expires_in")
+    wp_cfg["expires_at"] = token_data.get("expires_at")
 
-    config["wordpress"] = rest_cfg
-    config["wordpress_rest"] = rest_cfg
+    config["wordpress"] = wp_cfg
     write_config(config, force=True)
-    typer.echo("WordPress REST token stored in ~/.thistlebot/config.json")
+    typer.echo("WordPress token stored in ~/.thistlebot/config.json")
 
 
 @wordpress_app.command("status")
-def wordpress_rest_status() -> None:
+def wordpress_status() -> None:
     config = load_config()
-    rest_cfg = _wordpress_rest_config(config)
+    wp_cfg = _wordpress_config(config)
 
-    enabled = bool(rest_cfg.get("enabled"))
-    token = rest_cfg.get("token")
-    client_id = rest_cfg.get("client_id")
-    client_secret = rest_cfg.get("client_secret")
+    enabled = bool(wp_cfg.get("enabled"))
+    token = wp_cfg.get("token")
+    client_id = wp_cfg.get("client_id")
+    client_secret = wp_cfg.get("client_secret")
 
-    typer.echo(f"WordPress REST enabled: {'yes' if enabled else 'no'}")
-    typer.echo(f"WordPress REST client_id: {'present' if client_id else 'missing'}")
-    typer.echo(f"WordPress REST client_secret: {'present' if client_secret else 'missing'}")
-    typer.echo(f"WordPress REST token: {'present' if token else 'missing'}")
+    typer.echo(f"WordPress enabled: {'yes' if enabled else 'no'}")
+    typer.echo(f"WordPress client_id: {'present' if client_id else 'missing'}")
+    typer.echo(f"WordPress client_secret: {'present' if client_secret else 'missing'}")
+    typer.echo(f"WordPress token: {'present' if token else 'missing'}")
 
-    expires_at = rest_cfg.get("expires_at")
+    expires_at = wp_cfg.get("expires_at")
     if token and isinstance(expires_at, (int, float)):
-        state = "expired" if wordpress_rest_token_expired(rest_cfg) else "active"
-        typer.echo(f"WordPress REST token state: {state}")
+        state = "expired" if wordpress_token_expired(wp_cfg) else "active"
+        typer.echo(f"WordPress token state: {state}")
 
 
 @wordpress_app.command("sites")
-def wordpress_rest_sites() -> None:
+def wordpress_sites() -> None:
     config = load_config()
-    rest_cfg = _wordpress_rest_config(config)
+    wp_cfg = _wordpress_config(config)
     try:
-        client = _wordpress_rest_client(config)
+        client = _wordpress_client(config)
         try:
             result = client.list_sites()
         except Exception:
             # Some tokens are single-blog scoped and cannot call /me/sites.
-            client_id = rest_cfg.get("client_id")
+            client_id = wp_cfg.get("client_id")
             if not isinstance(client_id, str) or not client_id:
                 raise
             info = client.token_info(client_id)
@@ -1183,7 +1182,7 @@ def wordpress_rest_sites() -> None:
             site = client.get_site(blog_ref)
             result = {"sites": [site], "token_scope": info.get("scope"), "single_blog_token": True}
     except Exception as exc:
-        typer.echo(f"WordPress REST sites lookup failed: {exc}", err=True)
+        typer.echo(f"WordPress sites lookup failed: {exc}", err=True)
         raise typer.Exit(code=1)
 
     sites = result.get("sites") if isinstance(result, dict) else None
@@ -1197,17 +1196,16 @@ def wordpress_rest_sites() -> None:
         site_id = first_site.get("ID")
         site_url = first_site.get("URL") or first_site.get("url")
         if site_id is not None:
-            rest_cfg["blog_id"] = site_id
+            wp_cfg["blog_id"] = site_id
         if isinstance(site_url, str) and site_url:
-            rest_cfg["blog_url"] = site_url
-            if not rest_cfg.get("blog"):
+            wp_cfg["blog_url"] = site_url
+            if not wp_cfg.get("blog"):
                 parsed = urllib.parse.urlparse(site_url)
                 if parsed.netloc:
-                    rest_cfg["blog"] = parsed.netloc
+                    wp_cfg["blog"] = parsed.netloc
                 else:
-                    rest_cfg["blog"] = site_url
-        config["wordpress"] = rest_cfg
-        config["wordpress_rest"] = rest_cfg
+                    wp_cfg["blog"] = site_url
+        config["wordpress"] = wp_cfg
         write_config(config, force=True)
 
     for item in sites:
@@ -1225,7 +1223,7 @@ def wordpress_rest_sites() -> None:
 
 
 @wordpress_app.command("create-post")
-def wordpress_rest_create_post(
+def wordpress_create_post(
     title: str = typer.Option(..., "--title", help="Post title"),
     content: str = typer.Option(..., "--content", help="Post content"),
     site: Optional[str] = typer.Option(None, "--site", help="Target site domain or site ID"),
@@ -1233,16 +1231,16 @@ def wordpress_rest_create_post(
 ) -> None:
     config = load_config()
     try:
-        site_ref = _wordpress_rest_site_ref(config, site)
-        client = _wordpress_rest_client(config)
+        site_ref = _wordpress_site_ref(config, site)
+        client = _wordpress_client(config)
         result = client.create_post(site_ref, title=title, content=content, status=status)
     except Exception as exc:
-        typer.echo(f"WordPress REST create post failed: {exc}", err=True)
+        typer.echo(f"WordPress create post failed: {exc}", err=True)
         raise typer.Exit(code=1)
 
     post_id = result.get("ID") if isinstance(result, dict) else None
     post_url = result.get("URL") if isinstance(result, dict) else None
-    typer.echo(f"WordPress REST post created on '{site_ref}'.")
+    typer.echo(f"WordPress post created on '{site_ref}'.")
     if post_id is not None:
         typer.echo(f"Post ID: {post_id}")
     if isinstance(post_url, str) and post_url:
@@ -1250,23 +1248,23 @@ def wordpress_rest_create_post(
 
 
 @wordpress_app.command("test")
-def wordpress_rest_test(
+def wordpress_test(
     site: Optional[str] = typer.Option(None, "--site", help="Target site domain or site ID"),
     yes: bool = typer.Option(False, "--yes", help="Skip confirmation prompt and create test post"),
 ) -> None:
     config = load_config()
     try:
-        site_ref = _wordpress_rest_site_ref(config, site)
-        if not yes and not typer.confirm(f"Create a REST test draft post on '{site_ref}'?", default=False):
+        site_ref = _wordpress_site_ref(config, site)
+        if not yes and not typer.confirm(f"Create a test draft post on '{site_ref}'?", default=False):
             typer.echo("Cancelled. No post created.")
             return
-        client = _wordpress_rest_client(config)
+        client = _wordpress_client(config)
         result = client.create_post(site_ref, title="Test", content="test", status="draft")
     except Exception as exc:
-        typer.echo(f"WordPress REST test failed: {exc}", err=True)
+        typer.echo(f"WordPress test failed: {exc}", err=True)
         raise typer.Exit(code=1)
 
-    typer.echo("WordPress REST test post created successfully.")
+    typer.echo("WordPress test post created successfully.")
     post_id = result.get("ID") if isinstance(result, dict) else None
     post_url = result.get("URL") if isinstance(result, dict) else None
     if post_id is not None:
@@ -1280,17 +1278,16 @@ def wordpress_logout(
     yes: bool = typer.Option(False, "--yes", help="Skip confirmation prompt"),
 ) -> None:
     config = load_config()
-    if not yes and not typer.confirm("Clear stored WordPress REST credentials?", default=True):
+    if not yes and not typer.confirm("Clear stored WordPress credentials?", default=True):
         typer.echo("Aborted.")
         return
 
-    rest_cfg = _wordpress_rest_config(config)
+    wp_cfg = _wordpress_config(config)
     for key in ("token", "token_type", "expires_in", "expires_at", "blog", "blog_id", "blog_url"):
-        rest_cfg[key] = None
-    config["wordpress"] = rest_cfg
-    config["wordpress_rest"] = rest_cfg
+        wp_cfg[key] = None
+    config["wordpress"] = wp_cfg
     write_config(config, force=True)
-    typer.echo("WordPress REST credentials cleared.")
+    typer.echo("WordPress credentials cleared.")
 
 
 @mcp_app.command("status")
@@ -1334,9 +1331,9 @@ def mcp_tools() -> None:
         typer.echo(name)
 
 
-@mcp_app.command("enable-open-web-search")
-def mcp_enable_open_web_search() -> None:
-    """Enable MCP and the open-web-search server in config."""
+@mcp_app.command("enable-open-websearch")
+def mcp_enable_open_websearch() -> None:
+    """Enable MCP and the open-websearch server in config."""
     config = load_config()
 
     mcp_cfg = config.get("mcp")
@@ -1350,7 +1347,7 @@ def mcp_enable_open_web_search() -> None:
         servers_cfg = {}
         mcp_cfg["servers"] = servers_cfg
 
-    open_web_search_cfg = servers_cfg.get("open-web-search")
+    open_web_search_cfg = servers_cfg.get("open-websearch")
     if not isinstance(open_web_search_cfg, dict):
         open_web_search_cfg = {
             "transport": "stdio",
@@ -1359,7 +1356,7 @@ def mcp_enable_open_web_search() -> None:
             "env": {"MODE": "stdio", "DEFAULT_SEARCH_ENGINE": "duckduckgo"},
             "timeout_seconds": 30,
         }
-        servers_cfg["open-web-search"] = open_web_search_cfg
+        servers_cfg["open-websearch"] = open_web_search_cfg
 
     open_web_search_cfg["enabled"] = True
     open_web_search_cfg.setdefault("transport", "stdio")
@@ -1375,7 +1372,7 @@ def mcp_enable_open_web_search() -> None:
     open_web_search_cfg.setdefault("timeout_seconds", 30)
 
     write_config(config, force=True)
-    typer.echo("Enabled mcp.enabled=true and mcp.servers.open-web-search.enabled=true")
+    typer.echo("Enabled mcp.enabled=true and mcp.servers.open-websearch.enabled=true")
     typer.echo("Run 'thistlebot mcp status' to verify connectivity.")
 
 
@@ -1384,46 +1381,42 @@ def mcp_connect() -> None:
     typer.echo("Deprecated. Use 'thistlebot mcp status' and 'thistlebot mcp tools'.")
 
 
-@agent_app.command("list")
-def agent_list() -> None:
-    """List discoverable agents (directories with agent.json)."""
-    from .agents.registry import discover_agents
-
-    agents = discover_agents()
-    if not agents:
-        typer.echo("No agents found.")
-        return
-    for item in agents:
-        typer.echo(f"{item.name}\t{item.description()}")
+_TOPIC_TEMPLATES: dict[str, str] = {
+    "ai": "Latest AI news",
+    "politics": "Latest politics news",
+    "finance": "Personal finance and making money",
+}
 
 
-@agent_app.command("run")
-def agent_run(
-    name: str = typer.Argument(..., help="Agent name"),
-    workflow: Optional[str] = typer.Option(None, "--workflow", help="Workflow id override"),
-    topic: Optional[str] = typer.Option(None, "--topic", help="Topic override for this run"),
-    status: Optional[str] = typer.Option(None, "--status", help="WordPress status override (draft/publish)"),
+def _on_agent_step(step_name: str, step_status: str) -> None:
+    if step_status == "started":
+        RICH_CONSOLE.print(f"[cyan]>> Step: {step_name}...[/cyan]")
+    elif step_status == "completed":
+        RICH_CONSOLE.print(f"[green]   {step_name} completed.[/green]")
+
+
+def _run_agent_workflow_command(
+    *,
+    name: str,
+    workflow: str | None = None,
+    topic: str | None = None,
+    status: str | None = None,
 ) -> None:
     from .agents.workflow import run_agent_workflow
 
     config_overrides: dict[str, Any] = {}
     if topic is not None:
-        config_overrides["topic_override"] = topic
+        config_overrides["topic"] = topic
     if status is not None:
         config_overrides["post_status"] = status
-
-    def _on_step(step_name: str, step_status: str) -> None:
-        if step_status == "started":
-            RICH_CONSOLE.print(f"[cyan]>> Step: {step_name}...[/cyan]")
-        elif step_status == "completed":
-            RICH_CONSOLE.print(f"[green]   {step_name} completed.[/green]")
+        config_overrides["publish_mode"] = "publish" if status == "publish" else "draft"
 
     try:
         result = run_agent_workflow(
             name,
             workflow_name=workflow,
             config_overrides=config_overrides or None,
-            on_step=_on_step,
+            on_step=_on_agent_step,
         )
     except Exception as exc:
         RICH_CONSOLE.print(f"[red]Agent run failed: {exc}[/red]")
@@ -1434,129 +1427,229 @@ def agent_run(
     RICH_CONSOLE.print(f"  Workflow: {result.get('workflow')}")
     RICH_CONSOLE.print(f"  Run dir:  {result.get('run_dir')}")
     RICH_CONSOLE.print(f"  Status:   {result.get('status')}")
-    final_path = Path(str(result.get("run_dir"))) / "final.md"
-    if final_path.exists():
-        RICH_CONSOLE.print("[bold]Final summary:[/bold]")
-        RICH_CONSOLE.print(final_path.read_text(encoding="utf-8")[:2000])
 
 
-@agent_app.command("status")
-def agent_status(
-    name: str = typer.Argument(..., help="Agent name"),
-    limit: int = typer.Option(5, "--limit", "-n", help="Number of recent runs to show"),
-) -> None:
-    from .agents.config import list_runs, load_agent_config
+def _ensure_mcp_for_blogger(config: dict[str, Any]) -> None:
+    mcp_cfg = config.get("mcp")
+    if not isinstance(mcp_cfg, dict):
+        mcp_cfg = {}
+        config["mcp"] = mcp_cfg
+    mcp_cfg["enabled"] = True
+
+    servers_cfg = mcp_cfg.get("servers")
+    if not isinstance(servers_cfg, dict):
+        servers_cfg = {}
+        mcp_cfg["servers"] = servers_cfg
+
+    open_websearch_cfg = servers_cfg.get("open-websearch")
+    if not isinstance(open_websearch_cfg, dict):
+        open_websearch_cfg = {}
+        servers_cfg["open-websearch"] = open_websearch_cfg
+    open_websearch_cfg["enabled"] = True
+    open_websearch_cfg.setdefault("transport", "stdio")
+    open_websearch_cfg.setdefault("command", "npx")
+    open_websearch_cfg.setdefault("args", ["-y", "open-websearch@latest"])
+    open_websearch_cfg.setdefault("timeout_seconds", 30)
+    env_cfg = open_websearch_cfg.get("env")
+    if not isinstance(env_cfg, dict):
+        env_cfg = {}
+        open_websearch_cfg["env"] = env_cfg
+    env_cfg.setdefault("MODE", "stdio")
+    env_cfg.setdefault("DEFAULT_SEARCH_ENGINE", "duckduckgo")
+
+    browser_cfg = servers_cfg.get("browser")
+    if not isinstance(browser_cfg, dict):
+        browser_cfg = {}
+        servers_cfg["browser"] = browser_cfg
+    browser_cfg["enabled"] = True
+    browser_cfg.setdefault("transport", "stdio")
+    browser_cfg.setdefault("command", "npx")
+    browser_cfg.setdefault("args", ["-y", "@playwright/mcp@latest"])
+    browser_cfg.setdefault("timeout_seconds", 30)
+
+
+def _prompt_schedule_preset() -> tuple[dict[str, Any], str]:
+    choices = [
+        "1/day",
+        "2/day",
+        "3/day",
+        "4/day",
+        "5/day",
+        "6/day",
+        "every hour",
+        "every 30 minutes",
+        "custom cron",
+    ]
+    selected = questionary.select("Select posting schedule", choices=choices, default="4/day").ask()
+    choice = str(selected or "4/day")
+
+    if choice.endswith("/day"):
+        times_per_day = int(choice.split("/")[0])
+        preset_crons = {
+            1: "0 0 * * *",
+            2: "0 0,12 * * *",
+            3: "0 0,8,16 * * *",
+            4: "0 0,6,12,18 * * *",
+            5: "0 0,5,10,15,20 * * *",
+            6: "0 0,4,8,12,16,20 * * *",
+        }
+        cron = preset_crons.get(times_per_day, "0 0,6,12,18 * * *")
+        return ({"enabled": True, "cron": cron, "timezone": "UTC"}, cron)
+    if choice == "every hour":
+        return ({"enabled": True, "interval_minutes": 60, "timezone": "UTC"}, "every 60 minutes")
+    if choice == "every 30 minutes":
+        return ({"enabled": True, "interval_minutes": 30, "timezone": "UTC"}, "every 30 minutes")
+
+    cron = questionary.text("Enter cron expression", default="0 0,6,12,18 * * *").ask()
+    cron_text = str(cron or "0 0,6,12,18 * * *").strip() or "0 0,6,12,18 * * *"
+    return ({"enabled": True, "cron": cron_text, "timezone": "UTC"}, cron_text)
+
+
+def _ensure_wordpress_login(config: dict[str, Any]) -> dict[str, Any]:
+    wp_cfg = config.get("wordpress")
+    if not isinstance(wp_cfg, dict):
+        wp_cfg = {}
+        config["wordpress"] = wp_cfg
+
+    client_id = str(wp_cfg.get("client_id") or "").strip()
+    client_secret = str(wp_cfg.get("client_secret") or "").strip()
+    token = str(wp_cfg.get("token") or "").strip()
+
+    if token and client_id and client_secret:
+        return wp_cfg
+
+    typer.echo("WordPress credentials are required.")
+    typer.echo("Create an app at https://developer.wordpress.com/apps/")
+    typer.echo("Use redirect URI: http://127.0.0.1:8766/callback")
+
+    if not client_id:
+        client_id = str(questionary.text("WordPress client_id").ask() or "").strip()
+    if not client_secret:
+        client_secret = str(questionary.password("WordPress client_secret").ask() or "").strip()
+    if not client_id or not client_secret:
+        raise RuntimeError("WordPress client_id and client_secret are required.")
+
+    redirect_uri = str(wp_cfg.get("redirect_uri") or WORDPRESS_DEFAULT_REDIRECT_URI)
+    scope = str(wp_cfg.get("scope") or "posts sites media")
+    token_data, _ = wordpress_login_flow(
+        client_id=client_id,
+        client_secret=client_secret,
+        redirect_uri=redirect_uri,
+        scope=scope,
+        timeout=30.0,
+        callback_timeout=240,
+        open_browser=True,
+        blog=None,
+    )
+    wp_cfg["enabled"] = True
+    wp_cfg["client_id"] = client_id
+    wp_cfg["client_secret"] = client_secret
+    wp_cfg["redirect_uri"] = redirect_uri
+    wp_cfg["scope"] = token_data.get("scope") or scope
+    wp_cfg["blog"] = token_data.get("blog") or wp_cfg.get("blog")
+    wp_cfg["blog_id"] = token_data.get("blog_id")
+    wp_cfg["blog_url"] = token_data.get("blog_url")
+    wp_cfg["token"] = token_data.get("access_token")
+    wp_cfg["token_type"] = token_data.get("token_type")
+    wp_cfg["expires_in"] = token_data.get("expires_in")
+    wp_cfg["expires_at"] = token_data.get("expires_at")
+    config["wordpress"] = wp_cfg
+    return wp_cfg
+
+
+def _pick_wordpress_site(config: dict[str, Any]) -> str:
+    current = str(_wordpress_config(config).get("blog") or "").strip()
+    if current:
+        return current
+    client = _wordpress_client(config)
+    sites_result = client.list_sites()
+    sites = sites_result.get("sites") if isinstance(sites_result, dict) else None
+    if not isinstance(sites, list) or not sites:
+        raise RuntimeError("No WordPress sites found for the authenticated token.")
+
+    choices: list[str] = []
+    for item in sites:
+        if not isinstance(item, dict):
+            continue
+        site_url = item.get("URL") or item.get("url") or ""
+        domain = ""
+        if isinstance(site_url, str) and site_url:
+            parsed = urllib.parse.urlparse(site_url)
+            domain = parsed.netloc or site_url
+        if domain:
+            choices.append(domain)
+    if not choices:
+        raise RuntimeError("No usable WordPress site domains found.")
+
+    selected = questionary.select("Select WordPress site", choices=choices, default=choices[0]).ask()
+    return str(selected or choices[0])
+
+
+def _default_agent_name() -> str:
+    from .agents.registry import list_agent_names
+
+    existing = set(list_agent_names())
+    index = 1
+    while True:
+        candidate = f"blogger{index}"
+        if candidate not in existing:
+            return candidate
+        index += 1
+
+
+def _create_agent_from_template(agent_name: str, template: str) -> None:
+    source = Path(__file__).resolve().parent / "agents" / "blogger"
+    target = Path(__file__).resolve().parent / "agents" / agent_name
+    if target.exists():
+        raise RuntimeError(f"Agent '{agent_name}' already exists.")
+    shutil.copytree(source, target)
+    manifest_path = target / "agent.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["name"] = agent_name
+    defaults = manifest.get("config", {}).get("defaults", {})
+    if isinstance(defaults, dict):
+        defaults["topic"] = _TOPIC_TEMPLATES.get(template, _TOPIC_TEMPLATES["ai"])
+        defaults["post_status"] = "draft"
+        defaults["publish_mode"] = "draft"
+        defaults["enforce_draft_mode"] = True
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+
+def _workflow_alias(agent_name: str, value: str | None) -> str:
     from .agents.loader import load_agent_definition
-    from .agents.memory import JsonFileMemoryStore
-    from .agents.runner import is_agent_daemon_running, read_agent_state
 
-    agent_def = load_agent_definition(name)
-    cfg = load_agent_config(name, agent_def)
-    daemon_state = read_agent_state(name)
-    daemon_running = is_agent_daemon_running(name)
-    memory_store = JsonFileMemoryStore(name)
-
-    RICH_CONSOLE.print(f"[bold]{name} agent[/bold]")
-    RICH_CONSOLE.print(f"  Site:  {cfg.get('site', 'not configured')}")
-    RICH_CONSOLE.print(f"  Topic: {cfg.get('topic', 'not configured')}")
-    RICH_CONSOLE.print(f"  Daemon running: {daemon_running}")
-    if daemon_state:
-        RICH_CONSOLE.print(f"  Last run at:   {daemon_state.get('last_run_at') or 'n/a'}")
-        RICH_CONSOLE.print(f"  Next run at:   {daemon_state.get('next_run_at') or 'n/a'}")
-        RICH_CONSOLE.print(f"  Last status:   {daemon_state.get('last_run_status') or 'n/a'}")
-        if daemon_state.get("last_error"):
-            RICH_CONSOLE.print(f"  Last error:    {daemon_state.get('last_error')}")
-
-    runs = list_runs(name)
-    if not runs:
-        RICH_CONSOLE.print("No runs found.")
-        return
-
-    RICH_CONSOLE.print(f"[bold]Recent runs (latest {limit}):[/bold]")
-    for run_dir in runs[:limit]:
-        meta_path = run_dir / "meta.json"
-        if meta_path.exists():
-            meta = json.loads(meta_path.read_text(encoding="utf-8"))
-            RICH_CONSOLE.print(
-                f"  {run_dir.name} status={meta.get('status','unknown')} steps={meta.get('steps',{})} ts={meta.get('timestamp','')}"
-            )
-        else:
-            files = [f.name for f in run_dir.iterdir() if f.is_file()]
-            RICH_CONSOLE.print(f"  {run_dir.name} files={files}")
-
-    recent_memories = memory_store.list_recent(limit=limit)
-    if recent_memories:
-        RICH_CONSOLE.print(f"[bold]Recent memory summaries (latest {limit}):[/bold]")
-        for entry in recent_memories:
-            RICH_CONSOLE.print(f"  {entry.timestamp} {entry.type} run={entry.run_id or '-'} {entry.summary[:120]}")
+    alias_or_name = str(value or "post").strip()
+    agent_def = load_agent_definition(agent_name)
+    aliases = agent_def.manifest.get("workflow_aliases")
+    if isinstance(aliases, dict):
+        mapped = aliases.get(alias_or_name)
+        if isinstance(mapped, str) and mapped.strip():
+            return mapped
+    if alias_or_name == "post":
+        return agent_def.default_workflow_name()
+    return alias_or_name
 
 
-@agent_app.command("config")
-def agent_config_show(name: str = typer.Argument(..., help="Agent name")) -> None:
+def _resolve_agent_schedule(name: str) -> dict[str, Any]:
     from .agents.config import load_agent_config
     from .agents.loader import load_agent_definition
 
     agent_def = load_agent_definition(name)
     cfg = load_agent_config(name, agent_def)
-    RICH_CONSOLE.print_json(json.dumps(cfg, indent=2, default=str))
+    runtime_schedule = cfg.get("schedule") if isinstance(cfg.get("schedule"), dict) else {}
+    merged = dict(agent_def.schedule())
+    merged.update(runtime_schedule)
+    return merged
 
 
-@agent_app.command("setup")
-def agent_setup(
-    name: str = typer.Argument(..., help="Agent name"),
-    site: Optional[str] = typer.Option(None, "--site", help="WordPress site to store in agent .env"),
-    topic: Optional[str] = typer.Option(None, "--topic", help="Default topic to store in agent .env"),
-    post_status: Optional[str] = typer.Option(None, "--post-status", help="Default post status to store in agent .env"),
-) -> None:
-    from .agents.config import runtime_agent_dir
-
-    agent_token = name.replace("-", "_").upper()
-    env_path = runtime_agent_dir(name) / ".env"
-    env_path.parent.mkdir(parents=True, exist_ok=True)
-
-    lines: list[str] = []
-    if env_path.exists():
-        lines = env_path.read_text(encoding="utf-8").splitlines()
-
-    updates: dict[str, str] = {}
-    if site is not None:
-        updates[f"THISTLEBOT_AGENT_{agent_token}_SITE"] = site
-    if topic is not None:
-        updates[f"THISTLEBOT_AGENT_{agent_token}_TOPIC"] = topic
-    if post_status is not None:
-        updates[f"THISTLEBOT_AGENT_{agent_token}_POST_STATUS"] = post_status
-
-    if not updates:
-        typer.echo("No values provided. Use --site/--topic/--post-status.")
-        raise typer.Exit(code=1)
-
-    kept: list[str] = []
-    for line in lines:
-        key = line.split("=", 1)[0].strip()
-        if key in updates:
-            continue
-        kept.append(line)
-    for key, value in updates.items():
-        kept.append(f"{key}={value}")
-
-    env_path.write_text("\n".join(kept).strip() + "\n", encoding="utf-8")
-    typer.echo(f"Updated {env_path}")
-
-
-@agent_app.command("start")
-def agent_start(
-    name: str = typer.Argument(..., help="Agent name"),
-    foreground: bool = typer.Option(False, "--foreground", help="Run in foreground (blocks terminal)"),
-) -> None:
-    from .agents.loader import load_agent_definition
+def _agent_start_impl(name: str, *, foreground: bool) -> None:
     from .agents.runner import AgentDaemon, is_agent_daemon_running
     from .agents.workflow import run_agent_workflow
     from .storage.paths import agent_log_path
 
-    agent_def = load_agent_definition(name)
-    schedule_cfg = agent_def.schedule()
+    schedule_cfg = _resolve_agent_schedule(name)
     if not bool(schedule_cfg.get("enabled", False)):
-        typer.echo("Schedule is disabled for this agent in agent.json.", err=True)
+        typer.echo("Schedule is disabled. Run setup first to configure schedule.", err=True)
         raise typer.Exit(code=1)
 
     if is_agent_daemon_running(name):
@@ -1573,7 +1666,7 @@ def agent_start(
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("a", encoding="utf-8") as log_fh:
         subprocess.Popen(  # noqa: S603
-            [sys.executable, "-m", "thistlebot", "agent", "daemon-run", name],
+            [sys.executable, "-m", "thistlebot", "agent", name, "daemon-run"],
             stdout=log_fh,
             stderr=log_fh,
             start_new_session=True,
@@ -1582,110 +1675,310 @@ def agent_start(
     typer.echo(f"Log file: {log_path}")
 
 
-@agent_app.command("stop")
-def agent_stop(name: str = typer.Argument(..., help="Agent name")) -> None:
-    from .agents.runner import stop_agent_daemon
-
-    ok = stop_agent_daemon(name)
-    if not ok:
-        typer.echo(f"No running daemon found for {name}.")
-        raise typer.Exit(code=1)
-    typer.echo(f"Stop signal sent to {name} daemon.")
-
-
-@agent_app.command("daemon-run", hidden=True)
-def agent_daemon_run(name: str = typer.Argument(..., help="Agent name")) -> None:
-    from .agents.loader import load_agent_definition
-    from .agents.runner import AgentDaemon
-    from .agents.workflow import run_agent_workflow
-
-    schedule_cfg = load_agent_definition(name).schedule()
-    daemon = AgentDaemon(agent_name=name, schedule_config=schedule_cfg, run_once=lambda: run_agent_workflow(name))
-    daemon.run_forever()
-
-
-@agent_app.command("retry")
-def agent_retry(
-    name: str = typer.Argument(..., help="Agent name"),
-    step_id: str = typer.Argument(..., help="Step id to retry"),
-    run_id: Optional[str] = typer.Option(None, "--run-id", help="Run id to retry from (latest if omitted)"),
-    status: Optional[str] = typer.Option(None, "--status", help="WordPress status override (draft/publish)"),
+def _agent_setup_impl(
+    *,
+    name: str,
+    site: str | None,
+    topic: str | None,
+    template: str | None,
+    post_status: str,
+    yes: bool,
 ) -> None:
-    from .agents.workflow import retry_step_from_run
-
-    overrides: dict[str, Any] = {}
-    if status is not None:
-        overrides["post_status"] = status
-
-    def _on_step(step_name: str, step_status: str) -> None:
-        if step_status == "started":
-            RICH_CONSOLE.print(f"[cyan]>> Step: {step_name}...[/cyan]")
-        elif step_status == "completed":
-            RICH_CONSOLE.print(f"[green]   {step_name} completed.[/green]")
-
-    try:
-        result = retry_step_from_run(
-            name,
-            step_id,
-            run_id=run_id,
-            config_overrides=overrides or None,
-            on_step=_on_step,
-        )
-    except Exception as exc:
-        RICH_CONSOLE.print(f"[red]Retry failed: {exc}[/red]")
-        raise typer.Exit(code=1)
-
-    RICH_CONSOLE.print("[bold green]Retry completed[/bold green]")
-    RICH_CONSOLE.print(f"  Agent:   {result.get('agent')}")
-    RICH_CONSOLE.print(f"  Run dir: {result.get('run_dir')}")
-    RICH_CONSOLE.print(f"  Status:  {result.get('status')}")
-
-
-@agent_app.command("action")
-def agent_action(
-    name: str = typer.Argument(..., help="Agent name"),
-    action: str = typer.Argument(..., help="Action name from agent.json actions"),
-    arg: list[str] = typer.Option([], "--arg", help="Action args in key=value format. Repeat flag for multiple."),
-) -> None:
+    from .agents.config import load_agent_config, save_agent_runtime_config
     from .agents.loader import load_agent_definition
-    from .core.tools.registry import build_tool_registry
-    from .integrations.mcp.registry import build_mcp_registry
-    from .llm.factory import build_llm_client, get_default_model
+
+    config = load_config()
+    _ensure_mcp_for_blogger(config)
+    _ensure_wordpress_login(config)
 
     agent_def = load_agent_definition(name)
-    actions = agent_def.actions()
-    action_def = actions.get(action) if isinstance(actions, dict) else None
-    if not isinstance(action_def, dict):
-        typer.echo(f"Unknown action '{action}' for agent '{name}'.", err=True)
+    current = load_agent_config(name, agent_def)
+
+    chosen_template = (template or "").strip().lower()
+    chosen_topic = (topic or "").strip()
+    if not chosen_topic:
+        if chosen_template not in _TOPIC_TEMPLATES and not yes:
+            selected = questionary.select(
+                "Topic template",
+                choices=["ai", "politics", "finance", "custom"],
+                default="ai",
+            ).ask()
+            chosen_template = str(selected or "ai")
+        if chosen_template == "custom":
+            chosen_topic = str(questionary.text("Enter topic", default=str(current.get("topic") or "")).ask() or "").strip()
+        else:
+            chosen_topic = _TOPIC_TEMPLATES.get(chosen_template or "ai", _TOPIC_TEMPLATES["ai"])
+
+    resolved_site = (site or "").strip() or _pick_wordpress_site(config)
+    schedule_cfg, schedule_text = ({"enabled": True, "cron": "0 0,6,12,18 * * *", "timezone": "UTC"}, "0 0,6,12,18 * * *")
+    if not yes:
+        schedule_cfg, schedule_text = _prompt_schedule_preset()
+
+    current["site"] = resolved_site
+    current["topic"] = chosen_topic
+    current["post_status"] = "publish" if post_status == "publish" else "draft"
+    current["publish_mode"] = "publish" if post_status == "publish" else "draft"
+    current["enforce_draft_mode"] = post_status != "publish"
+    current["topic_template"] = chosen_template or "ai"
+    current["schedule"] = schedule_cfg
+
+    write_config(config, force=True)
+    path = save_agent_runtime_config(name, current)
+
+    typer.echo(f"Setup complete for agent '{name}'.")
+    typer.echo(f"Schedule: {schedule_text} ({schedule_cfg.get('timezone', 'UTC')})")
+    typer.echo(f"Config: {path}")
+    typer.echo(f"Modify config: thistlebot agent {name} config set key=value")
+    typer.echo(f"One run: thistlebot agent {name} workflow post")
+    typer.echo(f"Scheduled daemon: thistlebot agent {name}")
+
+
+@agent_app.command("list")
+def agent_list() -> None:
+    from .agents.registry import discover_agents
+
+    agents = discover_agents()
+    if not agents:
+        typer.echo("No agents found.")
+        return
+    for item in agents:
+        typer.echo(f"{item.name}\t{item.description()}")
+
+
+@agent_app.command("create")
+def agent_create(
+    template: str = typer.Option("ai", "--template", help="Template: ai|politics|finance"),
+    name: Optional[str] = typer.Option(None, "--name", help="Agent name (default: bloggerN)"),
+) -> None:
+    chosen_template = template.strip().lower()
+    if chosen_template not in _TOPIC_TEMPLATES:
+        typer.echo("Invalid --template. Use: ai, politics, finance.", err=True)
         raise typer.Exit(code=1)
 
-    handler_ref = action_def.get("handler")
-    if not isinstance(handler_ref, str) or ":" not in handler_ref:
-        typer.echo("Invalid action handler in agent.json", err=True)
-        raise typer.Exit(code=1)
-    module_name, func_name = handler_ref.split(":", 1)
-    module = importlib.import_module(f"thistlebot.agents.{name}.{module_name}")
-    handler = getattr(module, func_name, None)
-    if not callable(handler):
-        typer.echo("Action handler is not callable", err=True)
-        raise typer.Exit(code=1)
+    agent_name = (name or "").strip() or _default_agent_name()
+    _create_agent_from_template(agent_name, chosen_template)
 
-    args_dict: dict[str, Any] = {}
-    for item in arg:
-        if "=" not in item:
-            typer.echo(f"Invalid --arg '{item}', expected key=value", err=True)
+    _agent_setup_impl(
+        name=agent_name,
+        site=None,
+        topic=None,
+        template=chosen_template,
+        post_status="draft",
+        yes=True,
+    )
+    typer.echo(f"Created agent '{agent_name}' from template '{chosen_template}'.")
+
+
+def _build_agent_subapp(agent_name: str) -> typer.Typer:
+    subapp = typer.Typer(help=f"{agent_name} agent commands")
+
+    @subapp.callback(invoke_without_command=True)
+    def agent_root(ctx: typer.Context) -> None:
+        if ctx.invoked_subcommand is None:
+            _agent_start_impl(agent_name, foreground=True)
+
+    @subapp.command("workflow")
+    def agent_workflow(
+        name_or_alias: Optional[str] = typer.Argument(None, help="Workflow name or alias (e.g. post)"),
+        topic: Optional[str] = typer.Option(None, "--topic", help="Topic override for this run"),
+        status: Optional[str] = typer.Option(None, "--status", help="WordPress status override (draft/publish)"),
+    ) -> None:
+        resolved = _workflow_alias(agent_name, name_or_alias)
+        _run_agent_workflow_command(name=agent_name, workflow=resolved, topic=topic, status=status)
+
+    @subapp.command("setup")
+    def agent_setup(
+        site: Optional[str] = typer.Option(None, "--site", help="WordPress site domain"),
+        topic: Optional[str] = typer.Option(None, "--topic", help="Custom topic override"),
+        template: Optional[str] = typer.Option(None, "--template", help="Template: ai|politics|finance|custom"),
+        post_status: str = typer.Option("draft", "--post-status", help="Default post status: draft|publish"),
+        yes: bool = typer.Option(False, "--yes", help="Use defaults and skip prompts"),
+    ) -> None:
+        _agent_setup_impl(
+            name=agent_name,
+            site=site,
+            topic=topic,
+            template=template,
+            post_status=post_status,
+            yes=yes,
+        )
+
+    config_subapp = typer.Typer(help="Agent config operations")
+    subapp.add_typer(config_subapp, name="config")
+
+    @config_subapp.command("show")
+    def agent_config_show() -> None:
+        from .agents.config import load_agent_config
+        from .agents.loader import load_agent_definition
+
+        agent_def = load_agent_definition(agent_name)
+        cfg = load_agent_config(agent_name, agent_def)
+        RICH_CONSOLE.print_json(json.dumps(cfg, indent=2, default=str))
+
+    @config_subapp.command("set")
+    def agent_config_set(
+        kv: list[str] = typer.Argument(..., help="One or more key=value pairs"),
+    ) -> None:
+        from .agents.config import load_agent_config, save_agent_runtime_config
+        from .agents.loader import load_agent_definition
+
+        agent_def = load_agent_definition(agent_name)
+        cfg = load_agent_config(agent_name, agent_def)
+
+        for item in kv:
+            if "=" not in item:
+                typer.echo(f"Invalid pair '{item}'. Expected key=value.", err=True)
+                raise typer.Exit(code=1)
+            key, raw_value = item.split("=", 1)
+            key_path = [part for part in key.strip().split(".") if part]
+            if not key_path:
+                typer.echo(f"Invalid key in '{item}'.", err=True)
+                raise typer.Exit(code=1)
+            value: Any = raw_value
+            lowered = raw_value.strip().lower()
+            if lowered in {"true", "false"}:
+                value = lowered == "true"
+            elif lowered in {"null", "none"}:
+                value = None
+            else:
+                try:
+                    value = json.loads(raw_value)
+                except Exception:
+                    value = raw_value
+
+            cursor: dict[str, Any] = cfg
+            for part in key_path[:-1]:
+                node = cursor.get(part)
+                if not isinstance(node, dict):
+                    node = {}
+                    cursor[part] = node
+                cursor = node
+            cursor[key_path[-1]] = value
+
+        path = save_agent_runtime_config(agent_name, cfg)
+        typer.echo(f"Updated {path}")
+
+    @subapp.command("status")
+    def agent_status(limit: int = typer.Option(5, "--limit", "-n", help="Number of recent runs to show")) -> None:
+        from .agents.config import list_runs, load_agent_config
+        from .agents.loader import load_agent_definition
+        from .agents.memory import JsonFileMemoryStore
+        from .agents.runner import is_agent_daemon_running, read_agent_state
+
+        agent_def = load_agent_definition(agent_name)
+        cfg = load_agent_config(agent_name, agent_def)
+        daemon_state = read_agent_state(agent_name)
+        daemon_running = is_agent_daemon_running(agent_name)
+        memory_store = JsonFileMemoryStore(agent_name)
+
+        RICH_CONSOLE.print(f"[bold]{agent_name} agent[/bold]")
+        RICH_CONSOLE.print(f"  Site:  {cfg.get('site', 'not configured')}")
+        RICH_CONSOLE.print(f"  Topic: {cfg.get('topic', 'not configured')}")
+        RICH_CONSOLE.print(f"  Daemon running: {daemon_running}")
+        if daemon_state:
+            RICH_CONSOLE.print(f"  Last run at:   {daemon_state.get('last_run_at') or 'n/a'}")
+            RICH_CONSOLE.print(f"  Next run at:   {daemon_state.get('next_run_at') or 'n/a'}")
+            RICH_CONSOLE.print(f"  Last status:   {daemon_state.get('last_run_status') or 'n/a'}")
+            if daemon_state.get("last_error"):
+                RICH_CONSOLE.print(f"  Last error:    {daemon_state.get('last_error')}")
+
+        runs = list_runs(agent_name)
+        if not runs:
+            RICH_CONSOLE.print("No runs found.")
+            return
+
+        RICH_CONSOLE.print(f"[bold]Recent runs (latest {limit}):[/bold]")
+        for run_dir in runs[:limit]:
+            meta_path = run_dir / "meta.json"
+            if meta_path.exists():
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                RICH_CONSOLE.print(
+                    f"  {run_dir.name} status={meta.get('status','unknown')} steps={meta.get('steps',{})} ts={meta.get('timestamp','')}"
+                )
+
+        recent_memories = memory_store.list_recent(limit=limit)
+        if recent_memories:
+            RICH_CONSOLE.print(f"[bold]Recent memory summaries (latest {limit}):[/bold]")
+            for entry in recent_memories:
+                RICH_CONSOLE.print(f"  {entry.timestamp} {entry.type} run={entry.run_id or '-'} {entry.summary[:120]}")
+
+    @subapp.command("start")
+    def agent_start() -> None:
+        _agent_start_impl(agent_name, foreground=False)
+
+    @subapp.command("stop")
+    def agent_stop() -> None:
+        from .agents.runner import stop_agent_daemon
+
+        ok = stop_agent_daemon(agent_name)
+        if not ok:
+            typer.echo(f"No running daemon found for {agent_name}.")
             raise typer.Exit(code=1)
-        key, value = item.split("=", 1)
-        args_dict[key.strip()] = value.strip()
+        typer.echo(f"Stop signal sent to {agent_name} daemon.")
 
-    cfg = load_config()
-    client = build_llm_client(cfg)
-    model = get_default_model(cfg)
-    mcp_registry = build_mcp_registry(cfg) if cfg.get("mcp", {}).get("enabled") else None
-    registry = build_tool_registry(cfg, mcp_registry, tool_spec=agent_def.tools())
+    @subapp.command("daemon-run", hidden=True)
+    def agent_daemon_run() -> None:
+        from .agents.runner import AgentDaemon
+        from .agents.workflow import run_agent_workflow
 
-    result = handler(agent_name=name, client=client, registry=registry, model=model, args=args_dict)
-    RICH_CONSOLE.print_json(json.dumps(result, indent=2, default=str))
+        schedule_cfg = _resolve_agent_schedule(agent_name)
+        daemon = AgentDaemon(agent_name=agent_name, schedule_config=schedule_cfg, run_once=lambda: run_agent_workflow(agent_name))
+        daemon.run_forever()
+
+    @subapp.command("action")
+    def agent_action(
+        action: str = typer.Argument(..., help="Action name from agent.json actions"),
+        arg: list[str] = typer.Option([], "--arg", help="Action args in key=value format. Repeat flag for multiple."),
+    ) -> None:
+        from .agents.loader import load_agent_definition
+        from .llm.factory import build_llm_client, get_default_model
+
+        agent_def = load_agent_definition(agent_name)
+        actions = agent_def.actions()
+        action_def = actions.get(action) if isinstance(actions, dict) else None
+        if not isinstance(action_def, dict):
+            typer.echo(f"Unknown action '{action}' for agent '{agent_name}'.", err=True)
+            raise typer.Exit(code=1)
+
+        handler_ref = action_def.get("handler")
+        if not isinstance(handler_ref, str) or ":" not in handler_ref:
+            typer.echo("Invalid action handler in agent.json", err=True)
+            raise typer.Exit(code=1)
+        module_name, func_name = handler_ref.split(":", 1)
+        module = importlib.import_module(f"thistlebot.agents.{agent_name}.{module_name}")
+        handler = getattr(module, func_name, None)
+        if not callable(handler):
+            typer.echo("Action handler is not callable", err=True)
+            raise typer.Exit(code=1)
+
+        args_dict: dict[str, Any] = {}
+        for item in arg:
+            if "=" not in item:
+                typer.echo(f"Invalid --arg '{item}', expected key=value", err=True)
+                raise typer.Exit(code=1)
+            key, value = item.split("=", 1)
+            args_dict[key.strip()] = value.strip()
+
+        cfg = load_config()
+        client = build_llm_client(cfg)
+        model = get_default_model(cfg)
+        mcp_registry = build_mcp_registry(cfg) if cfg.get("mcp", {}).get("enabled") else None
+        registry = build_tool_registry(cfg, mcp_registry, tool_spec=agent_def.tools())
+
+        result = handler(agent_name=agent_name, client=client, registry=registry, model=model, args=args_dict)
+        RICH_CONSOLE.print_json(json.dumps(result, indent=2, default=str))
+
+    return subapp
+
+
+def _register_agent_subapps() -> None:
+    from .agents.registry import discover_agents
+
+    for agent in discover_agents():
+        agent_app.add_typer(_build_agent_subapp(agent.name), name=agent.name)
+
+
+_register_agent_subapps()
 
 
 if __name__ == "__main__":

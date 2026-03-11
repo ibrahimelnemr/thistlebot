@@ -56,11 +56,10 @@
       "type": "llm",
       "prompt": "publisher",
       "required_success_tools": [
-        "wordpress.create_post",
-        "wordpress.rest.create_post"
+        "wordpress.create_post"
       ],
       "fallback": {
-        "tool": "wordpress.rest.create_post",
+        "tool": "wordpress.create_post",
         "required_fields": ["site", "title", "content", "status"],
         "args_from_inputs": {
           "site": "site",

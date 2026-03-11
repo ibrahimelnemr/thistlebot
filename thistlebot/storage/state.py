@@ -97,7 +97,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
                 },
                 "timeout_seconds": 30,
             },
-            "open-web-search": {
+            "open-websearch": {
                 "enabled": False,
                 "transport": "stdio",
                 "command": "npx",
@@ -207,8 +207,8 @@ def normalize_config(config: dict[str, Any]) -> dict[str, Any]:
         if key not in wordpress_cfg:
             wordpress_cfg[key] = copy.deepcopy(value)
 
-    # Compatibility alias for older code paths.
-    cfg["wordpress_rest"] = wordpress_cfg
+    cfg.pop("wordpress_rest", None)
+    cfg.pop("wordpress_mcp", None)
 
     mcp_cfg = cfg.get("mcp")
     if not isinstance(mcp_cfg, dict):
@@ -227,6 +227,16 @@ def normalize_config(config: dict[str, Any]) -> dict[str, Any]:
         for server_name, server_defaults in default_servers_cfg.items():
             if server_name not in servers_cfg:
                 servers_cfg[server_name] = copy.deepcopy(server_defaults)
+
+    legacy_open_web_search = servers_cfg.get("open-web-search")
+    if isinstance(legacy_open_web_search, dict):
+        target = servers_cfg.get("open-websearch")
+        if not isinstance(target, dict):
+            target = {}
+            servers_cfg["open-websearch"] = target
+        for key, value in legacy_open_web_search.items():
+            target.setdefault(key, copy.deepcopy(value))
+        servers_cfg.pop("open-web-search", None)
 
     if "wpcom-mcp" in servers_cfg:
         servers_cfg.pop("wpcom-mcp", None)

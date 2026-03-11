@@ -22,6 +22,10 @@ def agent_runs_dir(name: str) -> Path:
     return runtime_agent_dir(name) / "runs"
 
 
+def runtime_agent_config_path(name: str) -> Path:
+    return runtime_agent_dir(name) / "config.json"
+
+
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     merged = copy.deepcopy(base)
     for key, value in override.items():
@@ -122,7 +126,18 @@ def load_agent_config(
     _load_agent_env(agent_def)
 
     base_defaults = agent_def.defaults()
-    merged = _apply_env_overrides(name, base_defaults, agent_def.required_config())
+    runtime_cfg_path = runtime_agent_config_path(name)
+    runtime_cfg: dict[str, Any] = {}
+    if runtime_cfg_path.exists():
+        try:
+            loaded = json.loads(runtime_cfg_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                runtime_cfg = loaded
+        except Exception:
+            runtime_cfg = {}
+
+    merged = _deep_merge(base_defaults, runtime_cfg)
+    merged = _apply_env_overrides(name, merged, agent_def.required_config())
     merged = _deep_merge(merged, config_overrides or {})
     merged = _resolve_site_from_main_config(merged)
 
@@ -135,6 +150,13 @@ def load_agent_config(
         )
 
     return merged
+
+
+def save_agent_runtime_config(name: str, config: dict[str, Any]) -> Path:
+    path = runtime_agent_config_path(name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(config, indent=2, default=str), encoding="utf-8")
+    return path
 
 
 def create_run_dir(name: str) -> Path:
