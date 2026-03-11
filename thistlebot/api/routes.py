@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Iterable
 
 from fastapi import APIRouter
@@ -15,6 +16,7 @@ from ..llm.factory import get_default_model
 
 
 EVENT_PREFIX = "[[THISTLEBOT_EVENT]]"
+LOGGER = logging.getLogger(__name__)
 
 
 def build_router(client: BaseLLMClient, sessions: SessionStore, config: dict) -> APIRouter:
@@ -64,34 +66,50 @@ def build_router(client: BaseLLMClient, sessions: SessionStore, config: dict) ->
         session_id = payload.get("session_id", "default")
         messages = payload.get("messages", [])
         model = payload.get("model") or get_default_model(config)
+        provider = str(config.get("llm", {}).get("provider") or "").strip()
+        stream_with_tools = bool(payload.get("stream_with_tools", False))
+        use_tool_loop_stream = tool_loop_enabled and tool_registry.list_tool_names() and (provider != "openrouter" or stream_with_tools)
 
         def event_stream() -> Iterable[str]:
             user_content = messages[-1]["content"] if messages else ""
             sessions.append_message(session_id, {"role": "user", "content": user_content})
             assistant_content = ""
+            stream_failed = False
 
-            if tool_loop_enabled and tool_registry.list_tool_names():
-                assistant_content, events = run_tool_agent(
-                    client=client,
-                    registry=tool_registry,
-                    model=model,
-                    messages=messages,
-                    max_iterations=max_iterations,
-                    return_events=True,
-                )
-                for event in events:
-                    yield f"data: {EVENT_PREFIX}{json.dumps(event)}\n\n"
-                if assistant_content:
-                    yield f"data: {assistant_content}\n\n"
-            else:
-                chunks = client.chat(messages, model=model, stream=True)
-                if not isinstance(chunks, str):
-                    for chunk in chunks:
-                        assistant_content += chunk
-                        yield f"data: {chunk}\n\n"
+            try:
+                if use_tool_loop_stream:
+                    assistant_content, events = run_tool_agent(
+                        client=client,
+                        registry=tool_registry,
+                        model=model,
+                        messages=messages,
+                        max_iterations=max_iterations,
+                        return_events=True,
+                    )
+                    for event in events:
+                        yield f"data: {EVENT_PREFIX}{json.dumps(event)}\n\n"
+                    if assistant_content:
+                        yield f"data: {assistant_content}\n\n"
+                else:
+                    chunks = client.chat(messages, model=model, stream=True)
+                    if not isinstance(chunks, str):
+                        for chunk in chunks:
+                            assistant_content += chunk
+                            yield f"data: {chunk}\n\n"
+            except Exception as exc:
+                stream_failed = True
+                LOGGER.exception("chat stream failed for session_id=%s model=%s", session_id, model)
+                event = {
+                    "event": "stream_error",
+                    "error_type": type(exc).__name__,
+                    "message": str(exc),
+                }
+                yield f"data: {EVENT_PREFIX}{json.dumps(event)}\n\n"
+                yield "data: [STREAM_ERROR]\n\n"
 
             sessions.append_message(session_id, {"role": "assistant", "content": assistant_content})
-            yield "data: [DONE]\n\n"
+            if not stream_failed:
+                yield "data: [DONE]\n\n"
 
         return StreamingResponse(event_stream(), media_type="text/event-stream")
 

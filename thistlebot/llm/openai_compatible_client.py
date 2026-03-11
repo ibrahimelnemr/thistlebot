@@ -67,6 +67,7 @@ class OpenAICompatibleClient(BaseLLMClient):
             return str(message.get("content", ""))
 
         def stream_chunks() -> Iterable[str]:
+            in_thinking = False
             with httpx.stream(
                 "POST",
                 url,
@@ -94,8 +95,46 @@ class OpenAICompatibleClient(BaseLLMClient):
                     if not isinstance(delta, dict):
                         continue
 
+                    reasoning = self._extract_reasoning_text(delta)
+                    if reasoning:
+                        if not in_thinking:
+                            yield "<think>"
+                            in_thinking = True
+                        yield reasoning
+
                     content = delta.get("content")
                     if isinstance(content, str) and content:
+                        if in_thinking:
+                            yield "</think>"
+                            in_thinking = False
                         yield content
 
+                    finish_reason = first_choice.get("finish_reason") if isinstance(first_choice, dict) else None
+                    if finish_reason and in_thinking:
+                        yield "</think>"
+                        in_thinking = False
+
+                if in_thinking:
+                    yield "</think>"
+
         return stream_chunks()
+
+    def _extract_reasoning_text(self, delta: dict) -> str:
+        candidates = [
+            delta.get("reasoning"),
+            delta.get("reasoning_content"),
+            delta.get("reasoning_text"),
+        ]
+        parts: list[str] = []
+        for candidate in candidates:
+            if isinstance(candidate, str) and candidate:
+                parts.append(candidate)
+            elif isinstance(candidate, list):
+                for item in candidate:
+                    if isinstance(item, str) and item:
+                        parts.append(item)
+                    elif isinstance(item, dict):
+                        text_value = item.get("text")
+                        if isinstance(text_value, str) and text_value:
+                            parts.append(text_value)
+        return "".join(parts)

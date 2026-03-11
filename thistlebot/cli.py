@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import sys
 import time
 import subprocess
 import webbrowser
@@ -270,6 +269,12 @@ def _gateway_host_port_from_config(config: dict) -> tuple[str, int]:
 
 def _render_tool_event(event: dict) -> None:
     event_type = str(event.get("event") or "")
+    if event_type == "stream_error":
+        error_type = str(event.get("error_type") or "Error")
+        message = str(event.get("message") or "unknown stream failure")
+        typer.secho(f"[stream error] {error_type}: {message}", fg="red")
+        return
+
     if event_type == "tool_call":
         tool_name = str(event.get("tool") or "unknown")
         args = event.get("args")
@@ -297,6 +302,22 @@ def _render_tool_event(event: dict) -> None:
 
     raw = json.dumps(event, ensure_ascii=False)
     typer.secho(f"[tool event] {raw}", fg="yellow")
+
+
+def _print_stream_failure_context(*, config: dict, model: str, gateway_url: str, exc: Exception) -> None:
+    provider = get_llm_provider(config)
+    message = str(exc)
+
+    typer.secho("Streaming request failed.", fg="red", err=True)
+    typer.echo(f"Provider: {provider}", err=True)
+    typer.echo(f"Model: {model}", err=True)
+    typer.echo(f"Gateway: {gateway_url.rstrip('/')}/chat/stream", err=True)
+    typer.echo(f"Failure: {message}", err=True)
+
+    lowered = message.lower()
+    if "incomplete chunked read" in lowered or "terminated early" in lowered:
+        typer.echo("Likely cause: gateway exception during SSE generation.", err=True)
+    typer.echo("Next step: inspect gateway stderr and ~/.thistlebot/logs/gateway.log", err=True)
 
 
 def _extract_text_from_tool_response(result: dict[str, Any]) -> str:
@@ -840,8 +861,8 @@ def chat(
                     if assistant_content:
                         messages.append({"role": "assistant", "content": assistant_content})
                 except Exception as exc:
-                    typer.echo(f"Error: {exc}", err=True)
-                    sys.exit(1)
+                    _print_stream_failure_context(config=config, model=active_model, gateway_url=gateway_url, exc=exc)
+                    raise typer.Exit(code=1)
     except RuntimeError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1)
@@ -960,7 +981,7 @@ def meeting(
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1)
     except Exception as exc:
-        typer.echo(f"Error: {exc}", err=True)
+        _print_stream_failure_context(config=config, model=f"{selected_model_a} / {selected_model_b}", gateway_url=gateway_url, exc=exc)
         raise typer.Exit(code=1)
 
 

@@ -27,6 +27,8 @@ def run_tool_agent(
 
         if not tool_calls:
             content = str(assistant_message.get("content") or "").strip()
+            if return_events:
+                return content, events
             return content
 
         history.append(
