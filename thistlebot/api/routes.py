@@ -27,6 +27,7 @@ def build_router(client: BaseLLMClient, sessions: SessionStore, config: dict) ->
     runtime_cfg = tools_cfg.get("runtime", {})
     tool_loop_enabled = bool(runtime_cfg.get("enabled", True))
     max_iterations = int(runtime_cfg.get("max_iterations", 8))
+    openrouter_stream_with_tools_default = bool(runtime_cfg.get("openrouter_stream_with_tools", False))
 
     @router.get("/health")
     def health() -> dict:
@@ -67,7 +68,11 @@ def build_router(client: BaseLLMClient, sessions: SessionStore, config: dict) ->
         messages = payload.get("messages", [])
         model = payload.get("model") or get_default_model(config)
         provider = str(config.get("llm", {}).get("provider") or "").strip()
-        stream_with_tools = bool(payload.get("stream_with_tools", False))
+        payload_stream_with_tools = payload.get("stream_with_tools")
+        if payload_stream_with_tools is None:
+            stream_with_tools = openrouter_stream_with_tools_default
+        else:
+            stream_with_tools = bool(payload_stream_with_tools)
         use_tool_loop_stream = tool_loop_enabled and tool_registry.list_tool_names() and (provider != "openrouter" or stream_with_tools)
 
         def event_stream() -> Iterable[str]:

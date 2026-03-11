@@ -265,6 +265,21 @@ Example config:
 }
 ```
 
+OpenRouter streaming behavior toggle:
+
+```json
+{
+	"tools": {
+		"runtime": {
+			"openrouter_stream_with_tools": false
+		}
+	}
+}
+```
+
+- `false` (default): bypasses tool-loop for streamed chat/meeting so token-level reasoning can stream live.
+- `true`: enables tool-loop on OpenRouter streamed requests (you may lose token-by-token reasoning visibility because tool-loop currently resolves non-stream internally).
+
 ### Generic OpenAI-compatible endpoint
 
 ```bash

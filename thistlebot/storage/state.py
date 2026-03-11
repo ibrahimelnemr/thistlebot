@@ -56,6 +56,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "runtime": {
             "enabled": True,
             "max_iterations": 8,
+            "openrouter_stream_with_tools": False,
         },
         "native": {
             "enabled": True,
@@ -229,6 +230,21 @@ def normalize_config(config: dict[str, Any]) -> dict[str, Any]:
 
     if "wpcom-mcp" in servers_cfg:
         servers_cfg.pop("wpcom-mcp", None)
+
+    tools_cfg = cfg.get("tools")
+    if not isinstance(tools_cfg, dict):
+        tools_cfg = {}
+    cfg["tools"] = tools_cfg
+
+    runtime_cfg = tools_cfg.get("runtime")
+    if not isinstance(runtime_cfg, dict):
+        runtime_cfg = {}
+    tools_cfg["runtime"] = runtime_cfg
+
+    default_runtime_cfg = dict(DEFAULT_CONFIG.get("tools", {}).get("runtime", {}))
+    for key, value in default_runtime_cfg.items():
+        if key not in runtime_cfg:
+            runtime_cfg[key] = copy.deepcopy(value)
 
     return cfg
 
