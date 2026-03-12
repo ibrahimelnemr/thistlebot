@@ -17,6 +17,12 @@ Thistlebot is a lightweight AI assistant with a small gateway service and CLI ch
 	thistlebot setup
 	```
    During setup, Thistlebot prompts for provider (`ollama`, `openrouter`, or `openai_compatible`), checks endpoint reachability, lists available models when possible, and asks you to select the primary model.
+	Setup now also enables built-in tools and MCP defaults automatically:
+	- `tools.runtime.enabled=true`
+	- `tools.native.enabled=true`
+	- `mcp.enabled=true`
+	- `mcp.servers.open-websearch.enabled=true`
+	If `npx` is missing, setup prints a warning to install Node.js and rerun setup (or run the MCP enable command after installation).
    Optional reset to defaults:
 	```bash
 	thistlebot reset
@@ -75,8 +81,12 @@ The blogger workflow can use MCP web search tools when MCP is enabled and
 	 ```
 3. Enable MCP and `open-websearch` in thistlebot config:
 	 ```bash
-	 thistlebot mcp enable-open-websearch
+	 thistlebot mcp enable open-websearch
 	 ```
+   Disable it later with:
+   ```bash
+   thistlebot mcp disable open-websearch
+   ```
 4. Verify the MCP server/tool visibility:
 	 ```bash
 	 thistlebot mcp status

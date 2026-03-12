@@ -6,6 +6,7 @@ import webbrowser
 import importlib
 import shutil
 import re
+import sys
 from pathlib import Path
 from typing import Any, Optional
 import json
@@ -39,12 +40,16 @@ github_app = typer.Typer(help="GitHub integrations")
 ollama_app = typer.Typer(help="Ollama diagnostics")
 llm_app = typer.Typer(help="LLM provider diagnostics")
 mcp_app = typer.Typer(help="MCP integrations")
+mcp_enable_app = typer.Typer(help="Enable MCP servers")
+mcp_disable_app = typer.Typer(help="Disable MCP servers")
 wordpress_app = typer.Typer(help="WordPress integrations (REST)")
 agent_app = typer.Typer(help="Persistent agent management")
 app.add_typer(github_app, name="github")
 app.add_typer(ollama_app, name="ollama")
 app.add_typer(llm_app, name="llm")
 app.add_typer(mcp_app, name="mcp")
+mcp_app.add_typer(mcp_enable_app, name="enable")
+mcp_app.add_typer(mcp_disable_app, name="disable")
 app.add_typer(wordpress_app, name="wordpress")
 app.add_typer(agent_app, name="agent")
 
@@ -570,6 +575,76 @@ def _ask_api_key_strategy(default_env: str) -> tuple[str, str | None]:
     return env_name, None
 
 
+def _ensure_builtin_tools_defaults(config: dict[str, Any]) -> None:
+    tools_cfg = config.get("tools")
+    if not isinstance(tools_cfg, dict):
+        tools_cfg = {}
+        config["tools"] = tools_cfg
+
+    runtime_cfg = tools_cfg.get("runtime")
+    if not isinstance(runtime_cfg, dict):
+        runtime_cfg = {}
+        tools_cfg["runtime"] = runtime_cfg
+    runtime_cfg["enabled"] = True
+
+    native_cfg = tools_cfg.get("native")
+    if not isinstance(native_cfg, dict):
+        native_cfg = {}
+        tools_cfg["native"] = native_cfg
+    native_cfg["enabled"] = True
+
+
+def _ensure_open_websearch_server(config: dict[str, Any], *, enabled: bool) -> tuple[bool, dict[str, Any]]:
+    mcp_cfg = config.get("mcp")
+    if not isinstance(mcp_cfg, dict):
+        mcp_cfg = {}
+        config["mcp"] = mcp_cfg
+    mcp_cfg["enabled"] = True
+
+    servers_cfg = mcp_cfg.get("servers")
+    if not isinstance(servers_cfg, dict):
+        servers_cfg = {}
+        mcp_cfg["servers"] = servers_cfg
+
+    server_cfg = servers_cfg.get("open-websearch")
+    if not isinstance(server_cfg, dict):
+        server_cfg = {}
+        servers_cfg["open-websearch"] = server_cfg
+
+    server_cfg["enabled"] = bool(enabled)
+    server_cfg.setdefault("transport", "stdio")
+    server_cfg.setdefault("command", "npx")
+    server_cfg.setdefault("args", ["-y", "open-websearch@latest"])
+    server_cfg.setdefault("timeout_seconds", 30)
+    env_cfg = server_cfg.get("env")
+    if not isinstance(env_cfg, dict):
+        env_cfg = {}
+        server_cfg["env"] = env_cfg
+    env_cfg.setdefault("MODE", "stdio")
+    env_cfg.setdefault("DEFAULT_SEARCH_ENGINE", "duckduckgo")
+
+    npx_available = shutil.which("npx") is not None
+    return npx_available, server_cfg
+
+
+def _finalize_setup_defaults(config: dict[str, Any]) -> None:
+    _ensure_builtin_tools_defaults(config)
+    npx_available, _ = _ensure_open_websearch_server(config, enabled=True)
+    write_config(config, force=True)
+
+    typer.echo("Built-in tools enabled: tools.runtime.enabled=true, tools.native.enabled=true")
+    typer.echo("MCP enabled: mcp.enabled=true")
+    typer.echo("Open Web Search enabled: mcp.servers.open-websearch.enabled=true")
+    if npx_available:
+        typer.echo("MCP check: npx detected; open-websearch is ready to use.")
+    else:
+        typer.echo("MCP check: npx not found.", err=True)
+        typer.echo(
+            "Install Node.js (includes npx), then run 'thistlebot setup' again or 'thistlebot mcp enable open-websearch'.",
+            err=True,
+        )
+
+
 @app.command()
 def setup(force: bool = typer.Option(False, "--force", help="Overwrite existing config/prompts")) -> None:
     _print_banner()
@@ -612,7 +687,7 @@ def setup(force: bool = typer.Option(False, "--force", help="Overwrite existing 
         config["providers"]["ollama"]["base_url"] = base_url
         config["ollama"]["base_url"] = base_url
         config["ollama"]["model"] = selected_model
-        write_config(config, force=True)
+        _finalize_setup_defaults(config)
         typer.echo(f"Primary model set to: {selected_model}")
         return
 
@@ -654,7 +729,7 @@ def setup(force: bool = typer.Option(False, "--force", help="Overwrite existing 
             selected_model = _ask_text("Primary OpenRouter model", current_model or "openai/gpt-4o-mini")
 
         config["llm"]["model"] = selected_model
-        write_config(config, force=True)
+        _finalize_setup_defaults(config)
         typer.echo(f"Primary model set to: {selected_model}")
         return
 
@@ -689,7 +764,7 @@ def setup(force: bool = typer.Option(False, "--force", help="Overwrite existing 
         )
 
     config["llm"]["model"] = selected_model
-    write_config(config, force=True)
+    _finalize_setup_defaults(config)
     typer.echo(f"Primary model set to: {selected_model}")
 
 
@@ -1331,49 +1406,63 @@ def mcp_tools() -> None:
         typer.echo(name)
 
 
-@mcp_app.command("enable-open-websearch")
-def mcp_enable_open_websearch() -> None:
-    """Enable MCP and the open-websearch server in config."""
+@mcp_enable_app.callback(invoke_without_command=True)
+def mcp_enable(server: str = typer.Argument(..., help="MCP server name, e.g. open-websearch")) -> None:
     config = load_config()
+    normalized = server.strip().lower().replace("_", "-")
+    if normalized == "open-web-search":
+        normalized = "open-websearch"
+
+    if normalized == "open-websearch":
+        npx_available, _ = _ensure_open_websearch_server(config, enabled=True)
+        write_config(config, force=True)
+        typer.echo("Enabled mcp.enabled=true and mcp.servers.open-websearch.enabled=true")
+        if npx_available:
+            typer.echo("npx detected. Run 'thistlebot mcp status' to verify connectivity.")
+        else:
+            typer.echo("npx not found. Install Node.js and run 'thistlebot mcp enable open-websearch' again.", err=True)
+        return
 
     mcp_cfg = config.get("mcp")
     if not isinstance(mcp_cfg, dict):
         mcp_cfg = {}
         config["mcp"] = mcp_cfg
-
     mcp_cfg["enabled"] = True
     servers_cfg = mcp_cfg.get("servers")
     if not isinstance(servers_cfg, dict):
         servers_cfg = {}
         mcp_cfg["servers"] = servers_cfg
-
-    open_web_search_cfg = servers_cfg.get("open-websearch")
-    if not isinstance(open_web_search_cfg, dict):
-        open_web_search_cfg = {
-            "transport": "stdio",
-            "command": "npx",
-            "args": ["-y", "open-websearch@latest"],
-            "env": {"MODE": "stdio", "DEFAULT_SEARCH_ENGINE": "duckduckgo"},
-            "timeout_seconds": 30,
-        }
-        servers_cfg["open-websearch"] = open_web_search_cfg
-
-    open_web_search_cfg["enabled"] = True
-    open_web_search_cfg.setdefault("transport", "stdio")
-    open_web_search_cfg.setdefault("command", "npx")
-    open_web_search_cfg.setdefault("args", ["-y", "open-websearch@latest"])
-    open_web_search_cfg.setdefault("env", {"MODE": "stdio", "DEFAULT_SEARCH_ENGINE": "duckduckgo"})
-    env_cfg = open_web_search_cfg.get("env")
-    if not isinstance(env_cfg, dict):
-        env_cfg = {}
-        open_web_search_cfg["env"] = env_cfg
-    env_cfg.setdefault("MODE", "stdio")
-    env_cfg.setdefault("DEFAULT_SEARCH_ENGINE", "duckduckgo")
-    open_web_search_cfg.setdefault("timeout_seconds", 30)
-
+    server_cfg = servers_cfg.get(normalized)
+    if not isinstance(server_cfg, dict):
+        server_cfg = {}
+        servers_cfg[normalized] = server_cfg
+    server_cfg["enabled"] = True
     write_config(config, force=True)
-    typer.echo("Enabled mcp.enabled=true and mcp.servers.open-websearch.enabled=true")
-    typer.echo("Run 'thistlebot mcp status' to verify connectivity.")
+    typer.echo(f"Enabled mcp.servers.{normalized}.enabled=true")
+
+
+@mcp_disable_app.callback(invoke_without_command=True)
+def mcp_disable(server: str = typer.Argument(..., help="MCP server name, e.g. open-websearch")) -> None:
+    config = load_config()
+    normalized = server.strip().lower().replace("_", "-")
+    if normalized == "open-web-search":
+        normalized = "open-websearch"
+
+    mcp_cfg = config.get("mcp")
+    if not isinstance(mcp_cfg, dict):
+        mcp_cfg = {}
+        config["mcp"] = mcp_cfg
+    servers_cfg = mcp_cfg.get("servers")
+    if not isinstance(servers_cfg, dict):
+        servers_cfg = {}
+        mcp_cfg["servers"] = servers_cfg
+    server_cfg = servers_cfg.get(normalized)
+    if not isinstance(server_cfg, dict):
+        server_cfg = {}
+        servers_cfg[normalized] = server_cfg
+    server_cfg["enabled"] = False
+    write_config(config, force=True)
+    typer.echo(f"Disabled mcp.servers.{normalized}.enabled=false")
 
 
 @app.command()
