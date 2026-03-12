@@ -64,6 +64,13 @@ def resolve_api_key(
     return fallback_env or None
 
 
+def resolve_openrouter_api_key(provider_cfg: dict[str, Any]) -> str | None:
+    api_key = provider_cfg.get("api_key")
+    if isinstance(api_key, str) and api_key.strip():
+        return api_key.strip()
+    return None
+
+
 def build_llm_client(config: dict[str, Any]) -> BaseLLMClient:
     provider = get_llm_provider(config)
 
@@ -75,7 +82,7 @@ def build_llm_client(config: dict[str, Any]) -> BaseLLMClient:
     if provider == "openrouter":
         provider_cfg = get_provider_config(config, "openrouter")
         base_url = str(provider_cfg.get("base_url", "https://openrouter.ai/api/v1"))
-        api_key = resolve_api_key(provider_cfg, default_env_name="OPENROUTER_API_KEY")
+        api_key = resolve_openrouter_api_key(provider_cfg)
         headers = dict(provider_cfg.get("default_headers") or {})
         app_name = provider_cfg.get("app_name")
         site_url = provider_cfg.get("site_url")

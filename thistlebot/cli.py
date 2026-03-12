@@ -31,7 +31,7 @@ from .integrations.wordpress.rest_oauth import (
     login_with_authorization_code_flow as wordpress_login_flow,
     token_expired as wordpress_token_expired,
 )
-from .llm.factory import get_default_model, get_llm_provider, get_provider_config, resolve_api_key
+from .llm.factory import get_default_model, get_llm_provider, get_provider_config, resolve_api_key, resolve_openrouter_api_key
 from .llm.openai_compatible_client import OpenAICompatibleClient
 from .storage.state import load_config, reset_storage, setup_storage, write_config
 
@@ -694,9 +694,19 @@ def setup(force: bool = typer.Option(False, "--force", help="Overwrite existing 
     if provider == "openrouter":
         base_url = _ask_text("OpenRouter base URL", _openrouter_base_url_from_config(config))
         provider_cfg = get_provider_config(config, "openrouter")
-        env_name, direct_key = _ask_api_key_strategy(str(provider_cfg.get("api_key_env", "OPENROUTER_API_KEY")))
+        existing_key = str(provider_cfg.get("api_key") or "").strip()
+        direct_key = existing_key or None
+        if sys.stdin.isatty() and sys.stdout.isatty():
+            try:
+                entered_key = questionary.password(
+                    "OpenRouter API key (stored in config; leave blank to keep existing)"
+                ).ask()
+            except Exception:
+                entered_key = None
+            candidate_key = str(entered_key or "").strip()
+            if candidate_key:
+                direct_key = candidate_key
         provider_cfg["base_url"] = base_url
-        provider_cfg["api_key_env"] = env_name
         provider_cfg["api_key"] = direct_key
         provider_cfg.setdefault("app_name", "thistlebot")
         provider_cfg.setdefault("site_url", None)
@@ -711,7 +721,7 @@ def setup(force: bool = typer.Option(False, "--force", help="Overwrite existing 
         if isinstance(site_url, str) and site_url.strip():
             headers.setdefault("HTTP-Referer", site_url.strip())
 
-        api_key = resolve_api_key(provider_cfg, default_env_name="OPENROUTER_API_KEY")
+        api_key = resolve_openrouter_api_key(provider_cfg)
         reachable, models, error = _discover_openai_compatible_models(base_url, api_key, headers=headers)
         if not reachable:
             typer.echo("Unable to reach OpenRouter at the configured endpoint.", err=True)
@@ -826,7 +836,7 @@ def llm_check() -> None:
     elif provider == "openrouter":
         base_url = _openrouter_base_url_from_config(config)
         cfg = get_provider_config(config, "openrouter")
-        api_key = resolve_api_key(cfg, default_env_name="OPENROUTER_API_KEY")
+        api_key = resolve_openrouter_api_key(cfg)
         headers = dict(cfg.get("default_headers") or {})
         app_name = cfg.get("app_name")
         site_url = cfg.get("site_url")

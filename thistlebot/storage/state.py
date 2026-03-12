@@ -21,7 +21,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
         },
         "openrouter": {
             "base_url": "https://openrouter.ai/api/v1",
-            "api_key_env": "OPENROUTER_API_KEY",
             "api_key": None,
             "app_name": "thistlebot",
             "site_url": None,
