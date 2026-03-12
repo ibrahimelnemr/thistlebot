@@ -144,9 +144,16 @@ def load_agent_config(
     missing = [key for key in agent_def.required_config() if merged.get(key) in {None, ""}]
     if missing:
         expected = ", ".join(missing)
+        env_hints: list[str] = []
+        for missing_key in missing:
+            variants = _env_key_variants(name, missing_key)
+            if variants:
+                env_hints.append(variants[0])
+        env_hint_text = ", ".join(env_hints)
         raise RuntimeError(
             f"Missing required agent config keys: {expected}. "
-            "Set THISTLEBOT_AGENT_<AGENT>_<KEY> in .env or environment."
+            f"Run 'thistlebot agent {name} setup' to configure automatically, "
+            f"or set env vars like: {env_hint_text}."
         )
 
     return merged

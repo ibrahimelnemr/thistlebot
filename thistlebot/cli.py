@@ -1708,12 +1708,16 @@ def _template_source_path(template: str) -> Path:
     return source
 
 
-def _create_agent_from_template(agent_name: str, template: str) -> None:
+def _create_agent_from_template(agent_name: str, template: str) -> str:
     source = _template_source_path(template)
     target = Path(__file__).resolve().parent / "agents" / agent_name
     if target.exists():
-        raise RuntimeError(f"Agent '{agent_name}' already exists.")
-    shutil.copytree(source, target)
+        shutil.copytree(source, target, dirs_exist_ok=True)
+        create_state = "resumed"
+    else:
+        shutil.copytree(source, target)
+        create_state = "created"
+
     manifest_path = target / "agent.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["name"] = agent_name
@@ -1726,6 +1730,7 @@ def _create_agent_from_template(agent_name: str, template: str) -> None:
         defaults["publish_mode"] = "draft"
         defaults["enforce_draft_mode"] = True
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    return create_state
 
 
 def _workflow_alias(agent_name: str, value: str | None) -> str:
@@ -1788,6 +1793,54 @@ def _agent_start_impl(name: str, *, foreground: bool) -> None:
     typer.echo(f"Log file: {log_path}")
 
 
+def _upsert_agent_env_file(*, name: str, required_keys: list[str], config_values: dict[str, Any]) -> Path:
+    from .agents.config import runtime_agent_dir
+
+    env_path = runtime_agent_dir(name) / ".env"
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+
+    existing_lines: list[str] = []
+    if env_path.exists():
+        existing_lines = env_path.read_text(encoding="utf-8").splitlines()
+
+    updates: dict[str, str] = {}
+    key_candidates = set(required_keys) | {"publish_mode", "enforce_draft_mode", "topic_template", "schedule"}
+    agent_token = name.replace("-", "_").upper()
+    for key in sorted(key_candidates):
+        if key not in config_values:
+            continue
+        value = config_values.get(key)
+        if value is None:
+            continue
+        if isinstance(value, (dict, list)):
+            rendered = json.dumps(value)
+        elif isinstance(value, bool):
+            rendered = "true" if value else "false"
+        else:
+            rendered = str(value)
+        env_key = f"THISTLEBOT_AGENT_{agent_token}_{key.replace('-', '_').replace('.', '_').upper()}"
+        updates[env_key] = rendered
+
+    if not updates:
+        return env_path
+
+    kept: list[str] = []
+    for line in existing_lines:
+        if "=" not in line:
+            kept.append(line)
+            continue
+        key = line.split("=", 1)[0].strip()
+        if key in updates:
+            continue
+        kept.append(line)
+
+    for key, value in updates.items():
+        kept.append(f"{key}={value}")
+
+    env_path.write_text("\n".join(kept).strip() + "\n", encoding="utf-8")
+    return env_path
+
+
 def _agent_setup_impl(
     *,
     name: str,
@@ -1838,10 +1891,16 @@ def _agent_setup_impl(
 
     write_config(config, force=True)
     path = save_agent_runtime_config(name, current)
+    env_path = _upsert_agent_env_file(
+        name=name,
+        required_keys=agent_def.required_config(),
+        config_values=current,
+    )
 
     typer.echo(f"Setup complete for agent '{name}'.")
     typer.echo(f"Schedule: {schedule_text} ({schedule_cfg.get('timezone', 'UTC')})")
     typer.echo(f"Config: {path}")
+    typer.echo(f"Env: {env_path}")
     typer.echo(f"Modify config: thistlebot agent {name} config set key=value")
     typer.echo(f"One run: thistlebot agent {name} workflow post")
     typer.echo(f"Scheduled daemon: thistlebot agent {name}")
@@ -1870,7 +1929,7 @@ def agent_create(
         raise typer.Exit(code=1)
 
     agent_name = (name or "").strip() or _default_agent_name()
-    _create_agent_from_template(agent_name, chosen_template)
+    create_state = _create_agent_from_template(agent_name, chosen_template)
 
     _agent_setup_impl(
         name=agent_name,
@@ -1880,7 +1939,10 @@ def agent_create(
         post_status="draft",
         yes=True,
     )
-    typer.echo(f"Created agent '{agent_name}' from template '{chosen_template}'.")
+    if create_state == "resumed":
+        typer.echo(f"Resumed setup for existing agent '{agent_name}' using template '{chosen_template}'.")
+    else:
+        typer.echo(f"Created agent '{agent_name}' from template '{chosen_template}'.")
 
 
 def _build_agent_subapp(agent_name: str) -> typer.Typer:
