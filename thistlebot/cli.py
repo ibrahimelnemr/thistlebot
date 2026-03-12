@@ -1656,16 +1656,56 @@ def _ensure_wordpress_login(config: dict[str, Any]) -> dict[str, Any]:
 
 
 def _pick_wordpress_site(config: dict[str, Any]) -> str:
-    current = str(_wordpress_config(config).get("blog") or "").strip()
-    if current:
-        return current
+    wp_cfg = _wordpress_config(config)
+    current_blog = str(wp_cfg.get("blog") or "").strip()
+    if current_blog:
+        return current_blog
+
+    blog_url = str(wp_cfg.get("blog_url") or "").strip()
+    if blog_url:
+        parsed = urllib.parse.urlparse(blog_url)
+        domain = parsed.netloc or blog_url
+        if domain:
+            wp_cfg["blog"] = domain
+            config["wordpress"] = wp_cfg
+            return domain
+
+    blog_id = wp_cfg.get("blog_id")
+    if isinstance(blog_id, (int, float)):
+        wp_cfg["blog"] = str(int(blog_id))
+        config["wordpress"] = wp_cfg
+        return str(int(blog_id))
+    if isinstance(blog_id, str) and blog_id.strip():
+        wp_cfg["blog"] = blog_id.strip()
+        config["wordpress"] = wp_cfg
+        return blog_id.strip()
+
     client = _wordpress_client(config)
-    sites_result = client.list_sites()
+    sites_result: dict[str, Any] | None = None
+    try:
+        raw = client.list_sites()
+        if isinstance(raw, dict):
+            sites_result = raw
+    except Exception:
+        client_id = wp_cfg.get("client_id")
+        if isinstance(client_id, str) and client_id.strip():
+            try:
+                info = client.token_info(client_id.strip())
+                blog_id = info.get("blog_id") if isinstance(info, dict) else None
+                if blog_id is not None:
+                    site = client.get_site(str(blog_id))
+                    sites_result = {"sites": [site]}
+            except Exception:
+                sites_result = None
+        if sites_result is None:
+            raise RuntimeError("No WordPress sites found for the authenticated token.")
+
     sites = sites_result.get("sites") if isinstance(sites_result, dict) else None
     if not isinstance(sites, list) or not sites:
         raise RuntimeError("No WordPress sites found for the authenticated token.")
 
     choices: list[str] = []
+    by_domain: dict[str, dict[str, Any]] = {}
     for item in sites:
         if not isinstance(item, dict):
             continue
@@ -1674,13 +1714,32 @@ def _pick_wordpress_site(config: dict[str, Any]) -> str:
         if isinstance(site_url, str) and site_url:
             parsed = urllib.parse.urlparse(site_url)
             domain = parsed.netloc or site_url
+        if not domain:
+            site_id = item.get("ID")
+            if site_id is not None:
+                domain = str(site_id)
         if domain:
             choices.append(domain)
+            by_domain[domain] = item
     if not choices:
         raise RuntimeError("No usable WordPress site domains found.")
 
-    selected = questionary.select("Select WordPress site", choices=choices, default=choices[0]).ask()
-    return str(selected or choices[0])
+    if sys.stdin.isatty() and sys.stdout.isatty():
+        selected = questionary.select("Select WordPress site", choices=choices, default=choices[0]).ask()
+        selected_domain = str(selected or choices[0])
+    else:
+        selected_domain = choices[0]
+
+    selected_item = by_domain.get(selected_domain, {})
+    wp_cfg["blog"] = selected_domain
+    site_url = selected_item.get("URL") or selected_item.get("url") if isinstance(selected_item, dict) else None
+    if isinstance(site_url, str) and site_url.strip():
+        wp_cfg["blog_url"] = site_url.strip()
+    site_id = selected_item.get("ID") if isinstance(selected_item, dict) else None
+    if site_id is not None:
+        wp_cfg["blog_id"] = site_id
+    config["wordpress"] = wp_cfg
+    return selected_domain
 
 
 def _default_agent_name() -> str:
@@ -1793,54 +1852,6 @@ def _agent_start_impl(name: str, *, foreground: bool) -> None:
     typer.echo(f"Log file: {log_path}")
 
 
-def _upsert_agent_env_file(*, name: str, required_keys: list[str], config_values: dict[str, Any]) -> Path:
-    from .agents.config import runtime_agent_dir
-
-    env_path = runtime_agent_dir(name) / ".env"
-    env_path.parent.mkdir(parents=True, exist_ok=True)
-
-    existing_lines: list[str] = []
-    if env_path.exists():
-        existing_lines = env_path.read_text(encoding="utf-8").splitlines()
-
-    updates: dict[str, str] = {}
-    key_candidates = set(required_keys) | {"publish_mode", "enforce_draft_mode", "topic_template", "schedule"}
-    agent_token = name.replace("-", "_").upper()
-    for key in sorted(key_candidates):
-        if key not in config_values:
-            continue
-        value = config_values.get(key)
-        if value is None:
-            continue
-        if isinstance(value, (dict, list)):
-            rendered = json.dumps(value)
-        elif isinstance(value, bool):
-            rendered = "true" if value else "false"
-        else:
-            rendered = str(value)
-        env_key = f"THISTLEBOT_AGENT_{agent_token}_{key.replace('-', '_').replace('.', '_').upper()}"
-        updates[env_key] = rendered
-
-    if not updates:
-        return env_path
-
-    kept: list[str] = []
-    for line in existing_lines:
-        if "=" not in line:
-            kept.append(line)
-            continue
-        key = line.split("=", 1)[0].strip()
-        if key in updates:
-            continue
-        kept.append(line)
-
-    for key, value in updates.items():
-        kept.append(f"{key}={value}")
-
-    env_path.write_text("\n".join(kept).strip() + "\n", encoding="utf-8")
-    return env_path
-
-
 def _agent_setup_impl(
     *,
     name: str,
@@ -1850,7 +1861,7 @@ def _agent_setup_impl(
     post_status: str,
     yes: bool,
 ) -> None:
-    from .agents.config import load_agent_config, save_agent_runtime_config
+    from .agents.config import load_agent_config, runtime_agent_config_path, save_agent_runtime_config
     from .agents.loader import load_agent_definition
 
     config = load_config()
@@ -1858,7 +1869,18 @@ def _agent_setup_impl(
     _ensure_wordpress_login(config)
 
     agent_def = load_agent_definition(name)
-    current = load_agent_config(name, agent_def)
+    try:
+        current = load_agent_config(name, agent_def)
+    except RuntimeError:
+        current = dict(agent_def.defaults())
+        runtime_cfg_path = runtime_agent_config_path(name)
+        if runtime_cfg_path.exists():
+            try:
+                loaded = json.loads(runtime_cfg_path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    current.update(loaded)
+            except Exception:
+                pass
 
     chosen_template = (template or "").strip().lower()
     chosen_topic = (topic or "").strip()
@@ -1891,16 +1913,9 @@ def _agent_setup_impl(
 
     write_config(config, force=True)
     path = save_agent_runtime_config(name, current)
-    env_path = _upsert_agent_env_file(
-        name=name,
-        required_keys=agent_def.required_config(),
-        config_values=current,
-    )
-
     typer.echo(f"Setup complete for agent '{name}'.")
     typer.echo(f"Schedule: {schedule_text} ({schedule_cfg.get('timezone', 'UTC')})")
     typer.echo(f"Config: {path}")
-    typer.echo(f"Env: {env_path}")
     typer.echo(f"Modify config: thistlebot agent {name} config set key=value")
     typer.echo(f"One run: thistlebot agent {name} workflow post")
     typer.echo(f"Scheduled daemon: thistlebot agent {name}")

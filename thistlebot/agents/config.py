@@ -2,15 +2,11 @@ from __future__ import annotations
 
 import copy
 import json
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from dotenv import load_dotenv
-
 from ..storage.paths import agent_dir
-from ..storage.state import load_config as load_main_config
 from .loader import AgentDefinition
 
 
@@ -36,84 +32,6 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
     return merged
 
 
-def _as_bool(value: str) -> bool:
-    normalized = value.strip().lower()
-    return normalized in {"1", "true", "yes", "on"}
-
-
-def _parse_env_value(value: str) -> Any:
-    raw = value.strip()
-    if raw == "":
-        return ""
-    if raw.lower() in {"true", "false", "yes", "no", "on", "off", "1", "0"}:
-        return _as_bool(raw)
-    if raw.lower() in {"null", "none"}:
-        return None
-    try:
-        if raw.isdigit() or (raw.startswith("-") and raw[1:].isdigit()):
-            return int(raw)
-        if any(ch in raw for ch in [".", "e", "E"]):
-            return float(raw)
-    except Exception:
-        pass
-    if (raw.startswith("{") and raw.endswith("}")) or (raw.startswith("[") and raw.endswith("]")):
-        try:
-            return json.loads(raw)
-        except Exception:
-            return raw
-    return raw
-
-
-def _env_key_variants(agent_name: str, key: str) -> list[str]:
-    key_token = key.replace("-", "_").replace(".", "_").upper()
-    agent_token = agent_name.replace("-", "_").upper()
-    return [
-        f"THISTLEBOT_AGENT_{agent_token}_{key_token}",
-        f"THISTLEBOT_AGENT_{key_token}",
-    ]
-
-
-def _load_agent_env(agent_def: AgentDefinition) -> None:
-    candidates = [
-        Path.cwd() / ".env",
-        agent_def.root / ".env",
-        runtime_agent_dir(agent_def.name) / ".env",
-    ]
-    seen: set[Path] = set()
-    for path in candidates:
-        if path in seen:
-            continue
-        seen.add(path)
-        if path.exists():
-            load_dotenv(path, override=False)
-
-
-def _apply_env_overrides(agent_name: str, config: dict[str, Any], required_keys: list[str]) -> dict[str, Any]:
-    out = copy.deepcopy(config)
-    keys = set(out.keys()) | set(required_keys)
-    for key in keys:
-        for env_key in _env_key_variants(agent_name, key):
-            raw = os.getenv(env_key)
-            if raw is None:
-                continue
-            out[key] = _parse_env_value(raw)
-            break
-    return out
-
-
-def _resolve_site_from_main_config(config: dict[str, Any]) -> dict[str, Any]:
-    if isinstance(config.get("site"), str) and str(config.get("site")).strip():
-        return config
-    main_cfg = load_main_config()
-    wp = main_cfg.get("wordpress", {}) if isinstance(main_cfg.get("wordpress"), dict) else {}
-    blog = wp.get("blog")
-    if isinstance(blog, str) and blog.strip():
-        updated = copy.deepcopy(config)
-        updated["site"] = blog.strip()
-        return updated
-    return config
-
-
 def load_agent_config(
     name: str,
     agent_def: AgentDefinition,
@@ -122,8 +40,6 @@ def load_agent_config(
 ) -> dict[str, Any]:
     if name != agent_def.name:
         raise ValueError(f"Agent name mismatch: expected {agent_def.name}, got {name}")
-
-    _load_agent_env(agent_def)
 
     base_defaults = agent_def.defaults()
     runtime_cfg_path = runtime_agent_config_path(name)
@@ -137,23 +53,17 @@ def load_agent_config(
             runtime_cfg = {}
 
     merged = _deep_merge(base_defaults, runtime_cfg)
-    merged = _apply_env_overrides(name, merged, agent_def.required_config())
     merged = _deep_merge(merged, config_overrides or {})
-    merged = _resolve_site_from_main_config(merged)
 
     missing = [key for key in agent_def.required_config() if merged.get(key) in {None, ""}]
     if missing:
         expected = ", ".join(missing)
-        env_hints: list[str] = []
-        for missing_key in missing:
-            variants = _env_key_variants(name, missing_key)
-            if variants:
-                env_hints.append(variants[0])
-        env_hint_text = ", ".join(env_hints)
+        config_path = runtime_agent_config_path(name)
         raise RuntimeError(
             f"Missing required agent config keys: {expected}. "
             f"Run 'thistlebot agent {name} setup' to configure automatically, "
-            f"or set env vars like: {env_hint_text}."
+            f"or set values with 'thistlebot agent {name} config set'. "
+            f"Runtime config path: {config_path}."
         )
 
     return merged
