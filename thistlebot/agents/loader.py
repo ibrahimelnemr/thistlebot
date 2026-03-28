@@ -77,7 +77,21 @@ class AgentDefinition:
         return path
 
     def load_prompt(self, prompt_name: str) -> str:
-        return self.prompt_path(prompt_name).read_text(encoding="utf-8")
+        # Try old-style prompts/<name>.md first (backward compat)
+        try:
+            return self.prompt_path(prompt_name).read_text(encoding="utf-8")
+        except (KeyError, FileNotFoundError):
+            pass
+        # Try SKILL.md format: skills/<name>/SKILL.md
+        skill = self.load_skill(prompt_name)
+        return skill.instructions
+
+    def load_skill(self, skill_name: str) -> "SkillDefinition":
+        from .skill_loader import load_skill, SkillDefinition  # noqa: F401
+        return load_skill(skill_name, self._skill_search_paths())
+
+    def _skill_search_paths(self) -> list[Path]:
+        return [self.root / "skills"]
 
     def workflow_path(self, workflow_name: str) -> Path:
         workflows = self.manifest.get("workflows", {})
@@ -104,6 +118,11 @@ def load_agent_definition(agent_name: str, *, agents_root: Path | None = None) -
         root = agents_root
     else:
         root = agents_root or (Path(__file__).resolve().parent / agent_name)
+
+    if (root / "AGENT.md").exists():
+        from .agent_md_loader import load_from_agent_md
+        return load_from_agent_md(root, agent_name)
+
     manifest_path = root / "agent.json"
     if not manifest_path.exists():
         raise FileNotFoundError(f"Agent definition not found: {manifest_path}")

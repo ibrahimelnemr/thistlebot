@@ -44,6 +44,7 @@ mcp_enable_app = typer.Typer(help="Enable MCP servers")
 mcp_disable_app = typer.Typer(help="Disable MCP servers")
 wordpress_app = typer.Typer(help="WordPress integrations (REST)")
 agent_app = typer.Typer(help="Persistent agent management")
+skill_app = typer.Typer(help="Skill management and execution")
 app.add_typer(github_app, name="github")
 app.add_typer(ollama_app, name="ollama")
 app.add_typer(llm_app, name="llm")
@@ -52,6 +53,7 @@ mcp_app.add_typer(mcp_enable_app, name="enable")
 mcp_app.add_typer(mcp_disable_app, name="disable")
 app.add_typer(wordpress_app, name="wordpress")
 app.add_typer(agent_app, name="agent")
+app.add_typer(skill_app, name="skill")
 
 RICH_CONSOLE = Console()
 THINK_OPEN_MARKERS = (
@@ -2180,6 +2182,168 @@ def _register_agent_subapps() -> None:
 
 
 _register_agent_subapps()
+
+
+# ---------------------------------------------------------------------------
+# skill commands
+# ---------------------------------------------------------------------------
+
+@skill_app.command("list")
+def skill_list(
+    agent: Optional[str] = typer.Option(None, "--agent", help="List skills for a specific agent"),
+) -> None:
+    """List available skills."""
+    from pathlib import Path as _Path
+    from .agents.skill_loader import list_skills
+
+    if agent:
+        from .agents.loader import load_agent_definition
+        agent_def = load_agent_definition(agent)
+        search_paths = agent_def._skill_search_paths()
+    else:
+        # Search all agent skill directories
+        agents_root = _Path(__file__).resolve().parent / "agents"
+        search_paths = [
+            child / "skills"
+            for child in agents_root.iterdir()
+            if child.is_dir() and not child.name.startswith("__")
+        ]
+
+    skills = list_skills(search_paths)
+    if not skills:
+        typer.echo("No skills found.")
+        return
+    for skill in skills:
+        tools_str = ", ".join(skill.allowed_tools) if skill.allowed_tools else "(inherits all)"
+        typer.echo(f"{skill.name}\t{skill.description or '(no description)'}\t[tools: {tools_str}]")
+
+
+@skill_app.command("run")
+def skill_run(
+    skill_name: str = typer.Argument(..., help="Skill name to run"),
+    agent: Optional[str] = typer.Option(None, "--agent", help="Agent to load skill from"),
+    arguments: str = typer.Option("", "--args", help="Arguments passed to $ARGUMENTS in skill instructions"),
+) -> None:
+    """Run a skill standalone."""
+    from pathlib import Path as _Path
+    from .agents.skill_loader import load_skill
+    from .agents.skill_runner import run_skill_standalone
+
+    config = load_config()
+    model = get_default_model(config)
+    client = get_llm_provider(config)
+    mcp_registry = build_mcp_registry(config)
+    registry = build_tool_registry(config, mcp_registry)
+
+    if agent:
+        from .agents.loader import load_agent_definition
+        agent_def = load_agent_definition(agent)
+        search_paths = agent_def._skill_search_paths()
+    else:
+        agents_root = _Path(__file__).resolve().parent / "agents"
+        search_paths = [
+            child / "skills"
+            for child in agents_root.iterdir()
+            if child.is_dir() and not child.name.startswith("__")
+        ]
+
+    skill = load_skill(skill_name, search_paths)
+    typer.echo(f"Running skill '{skill.name}'...")
+    result = run_skill_standalone(
+        skill,
+        client=client,
+        registry=registry,
+        model=model,
+        arguments=arguments,
+    )
+    typer.echo(result)
+
+
+# ---------------------------------------------------------------------------
+# agent migrate command
+# ---------------------------------------------------------------------------
+
+@agent_app.command("migrate")
+def agent_migrate(
+    name: str = typer.Argument(..., help="Agent name to migrate"),
+) -> None:
+    """Migrate an agent from agent.json+prompts/ to AGENT.md+skills/."""
+    from pathlib import Path as _Path
+    import shutil as _shutil
+    from .agents.loader import load_agent_definition
+
+    agent_def = load_agent_definition(name)
+    root = agent_def.root
+
+    agent_json = root / "agent.json"
+    agent_md = root / "AGENT.md"
+    if agent_md.exists():
+        typer.echo(f"AGENT.md already exists for '{name}'. Nothing to do.")
+        return
+
+    # Build AGENT.md content from existing manifest
+    manifest = agent_def.manifest
+    tools_native = []
+    tools_mcp = []
+    raw_tools = manifest.get("tools", {})
+    if isinstance(raw_tools, dict):
+        tools_native = raw_tools.get("native", [])
+        tools_mcp = raw_tools.get("mcp", [])
+    all_tools = tools_native + tools_mcp
+
+    ext = {
+        "config": manifest.get("config", {"defaults": {}, "required": []}),
+    }
+    if manifest.get("schedule"):
+        ext["schedule"] = manifest["schedule"]
+    if manifest.get("workflow_overrides"):
+        wf_section: dict[str, Any] = {"default": agent_def.default_workflow_name()}
+        wf_section.update(manifest["workflow_overrides"])
+        ext["workflow"] = wf_section
+    if manifest.get("hooks"):
+        ext["hooks"] = manifest["hooks"]
+    if manifest.get("actions"):
+        ext["actions"] = manifest["actions"]
+
+    import yaml as _yaml
+    frontmatter_dict: dict[str, Any] = {
+        "name": manifest.get("name", name),
+        "version": manifest.get("version", "0.1.0"),
+        "description": manifest.get("description", ""),
+        "tools": all_tools,
+        "disallowedTools": [],
+        "model": manifest.get("model"),
+        "x-thistlebot": ext,
+    }
+    frontmatter_str = _yaml.dump(frontmatter_dict, default_flow_style=False, allow_unicode=True)
+    agent_md_content = f"---\n{frontmatter_str}---\n\n{manifest.get('description', name)} agent.\n"
+    agent_md.write_text(agent_md_content, encoding="utf-8")
+    typer.echo(f"Created {agent_md}")
+
+    # Convert prompts/*.md → skills/*/SKILL.md
+    prompts_dir = root / "prompts"
+    skills_dir = root / "skills"
+    if prompts_dir.exists():
+        skills_dir.mkdir(exist_ok=True)
+        prompts_map = manifest.get("prompts", {})
+        for prompt_name, prompt_rel in prompts_map.items():
+            prompt_path = root / prompt_rel
+            if not prompt_path.exists():
+                continue
+            skill_dir = skills_dir / prompt_name
+            skill_dir.mkdir(exist_ok=True)
+            skill_md = skill_dir / "SKILL.md"
+            if skill_md.exists():
+                typer.echo(f"  {skill_md} already exists, skipping")
+                continue
+            prompt_text = prompt_path.read_text(encoding="utf-8")
+            skill_frontmatter = {"name": prompt_name, "description": f"{prompt_name} skill", "allowed-tools": []}
+            fm_str = _yaml.dump(skill_frontmatter, default_flow_style=False, allow_unicode=True)
+            skill_md.write_text(f"---\n{fm_str}---\n{prompt_text}", encoding="utf-8")
+            typer.echo(f"  Created {skill_md}")
+
+    typer.echo(f"\nMigration complete for '{name}'.")
+    typer.echo("Both agent.json and prompts/ are kept intact. Remove them when ready.")
 
 
 if __name__ == "__main__":

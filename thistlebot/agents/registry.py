@@ -11,7 +11,9 @@ def discover_agents(agents_root: Path | None = None) -> list[AgentDefinition]:
     for child in sorted(root.iterdir(), key=lambda p: p.name):
         if not child.is_dir() or child.name.startswith("__"):
             continue
-        if not (child / "agent.json").exists():
+        has_agent_md = (child / "AGENT.md").exists()
+        has_agent_json = (child / "agent.json").exists()
+        if not has_agent_md and not has_agent_json:
             continue
         found.append(load_agent_definition(child.name, agents_root=child))
     return found

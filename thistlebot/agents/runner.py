@@ -208,9 +208,9 @@ def _execute_step(
     if step_type != "llm":
         raise ValueError(f"Unsupported step type: {step_type}")
 
-    prompt_name = str(step.get("prompt") or "")
+    prompt_name = str(step.get("skill") or step.get("prompt") or "")
     if not prompt_name:
-        raise ValueError("LLM step requires a prompt")
+        raise ValueError("LLM step requires a 'skill' or 'prompt' field")
 
     prompt_text = agent_definition.load_prompt(prompt_name)
     resolved_inputs = _resolve_inputs(

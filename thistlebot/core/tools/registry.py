@@ -66,7 +66,13 @@ def build_tool_registry(
             registry.register(mcp_entry)
 
     if isinstance(tool_spec, dict) and tool_spec:
-        registry = _filter_registry_by_spec(registry, tool_spec)
+        # Support both old nested format and new flat allow/deny format
+        if "allow" in tool_spec or "deny" in tool_spec:
+            allow = tool_spec.get("allow") or []
+            deny = tool_spec.get("deny") or []
+            registry = filter_by_allowlist_denylist(registry, allow or None, deny or None)
+        else:
+            registry = _filter_registry_by_spec(registry, tool_spec)
 
     return registry
 
@@ -294,6 +300,26 @@ def _register_native_tools(registry: ToolRegistry, native: NativeTools) -> None:
             source="native",
         )
     )
+
+
+def filter_by_allowlist_denylist(
+    registry: ToolRegistry,
+    allow: list[str] | None,
+    deny: list[str] | None,
+) -> ToolRegistry:
+    """Filter using flat glob-pattern allow/deny lists.
+
+    If *allow* is non-empty, only tools matching at least one allow pattern are kept.
+    If *deny* is non-empty, tools matching any deny pattern are removed.
+    """
+    selected = ToolRegistry()
+    for name, entry in registry._tools.items():
+        if deny and any(fnmatch.fnmatch(name, pattern) for pattern in deny):
+            continue
+        if allow and not any(fnmatch.fnmatch(name, pattern) for pattern in allow):
+            continue
+        selected.register(entry)
+    return selected
 
 
 def normalize_tool_args(raw_args: Any) -> dict[str, Any]:
