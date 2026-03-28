@@ -31,3 +31,6 @@ htmlcov/
 # Markdown notes at repo root (keep README.md)
 /*.md
 !/README.md
+docs
+.claude
+thistlebot.code-workspace
