@@ -41,15 +41,17 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "client_id": "Ov23likecnqtFvsVynK2",
         "token": None,
     },
-    "wordpress": {
-        "enabled": False,
-        "client_id": None,
-        "client_secret": None,
-        "token": None,
-        "expires_at": None,
-        "redirect_uri": "http://127.0.0.1:8766/callback",
-        "scope": "posts",
-        "blog": None,
+    "integrations": {
+        "wordpress": {
+            "enabled": False,
+            "client_id": None,
+            "client_secret": None,
+            "token": None,
+            "expires_at": None,
+            "redirect_uri": "http://127.0.0.1:8766/callback",
+            "scope": "posts",
+            "blog": None,
+        },
     },
     "tools": {
         "runtime": {
@@ -183,31 +185,7 @@ def normalize_config(config: dict[str, Any]) -> dict[str, Any]:
         "openai_compatible",
         dict(default_providers_cfg.get("openai_compatible", {})),
     )
-
-    wordpress_cfg = cfg.get("wordpress")
-    if not isinstance(wordpress_cfg, dict):
-        wordpress_cfg = {}
-
-    legacy_wordpress_rest_cfg = cfg.get("wordpress_rest")
-    if isinstance(legacy_wordpress_rest_cfg, dict):
-        for key, value in legacy_wordpress_rest_cfg.items():
-            wordpress_cfg.setdefault(key, value)
-
-    legacy_wordpress_mcp_cfg = cfg.get("wordpress_mcp")
-    if isinstance(legacy_wordpress_mcp_cfg, dict) and not wordpress_cfg.get("token"):
-        # Best-effort migration for users who only had legacy WordPress config.
-        for key in ("client_id", "token", "token_type", "expires_in", "expires_at"):
-            value = legacy_wordpress_mcp_cfg.get(key)
-            if value is not None:
-                wordpress_cfg.setdefault(key, value)
-
-    cfg["wordpress"] = wordpress_cfg
-    for key, value in dict(DEFAULT_CONFIG.get("wordpress", {})).items():
-        if key not in wordpress_cfg:
-            wordpress_cfg[key] = copy.deepcopy(value)
-
-    cfg.pop("wordpress_rest", None)
-    cfg.pop("wordpress_mcp", None)
+    _normalize_integrations(cfg)
 
     mcp_cfg = cfg.get("mcp")
     if not isinstance(mcp_cfg, dict):
@@ -256,6 +234,24 @@ def normalize_config(config: dict[str, Any]) -> dict[str, Any]:
             runtime_cfg[key] = copy.deepcopy(value)
 
     return cfg
+
+
+def _normalize_integrations(cfg: dict[str, Any]) -> None:
+    integrations_cfg = cfg.get("integrations")
+    if not isinstance(integrations_cfg, dict):
+        integrations_cfg = {}
+    cfg["integrations"] = integrations_cfg
+
+    wp_integration_cfg = integrations_cfg.get("wordpress")
+    if not isinstance(wp_integration_cfg, dict):
+        wp_integration_cfg = {}
+
+    defaults = dict(DEFAULT_CONFIG.get("integrations", {}).get("wordpress", {}))
+    for key, value in defaults.items():
+        if key not in wp_integration_cfg:
+            wp_integration_cfg[key] = copy.deepcopy(value)
+
+    integrations_cfg["wordpress"] = wp_integration_cfg
 
 
 def load_config() -> dict[str, Any]:

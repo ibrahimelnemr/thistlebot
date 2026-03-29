@@ -15,8 +15,9 @@ from .config import (
 from .hooks.base import run_hooks
 from .loader import load_agent_definition
 from .memory import JsonFileMemoryStore
-from .runner import execute_workflow
+from ..core.workflow import CompositeFallbackResolver, execute_workflow
 from ..core.tools.registry import build_tool_registry
+from ..integrations.registry import build_integration_runtime
 from ..integrations.mcp.registry import build_mcp_registry
 from ..llm.factory import build_llm_client, get_default_model
 from ..storage.state import load_config
@@ -67,6 +68,7 @@ def run_agent_workflow(
     model = get_default_model(config)
     mcp_registry = build_mcp_registry(config) if config.get("mcp", {}).get("enabled") else None
     registry = build_tool_registry(config, mcp_registry, tool_spec=agent_definition.tools())
+    integration_runtime = build_integration_runtime(config)
 
     resolved_workflow_name = workflow_name or agent_definition.default_workflow_name()
     workflow_def = copy.deepcopy(agent_definition.load_workflow(resolved_workflow_name))
@@ -124,6 +126,8 @@ def run_agent_workflow(
             model=model,
             on_step=on_step,
             memory_store=memory_store,
+            middlewares=integration_runtime.middlewares(),
+            fallback_resolver=CompositeFallbackResolver(integration_runtime.fallback_resolvers()),
         )
     except Exception as exc:
         result["status"] = "failed"
@@ -185,6 +189,7 @@ def retry_step_from_run(
     model = get_default_model(config)
     mcp_registry = build_mcp_registry(config) if config.get("mcp", {}).get("enabled") else None
     registry = build_tool_registry(config, mcp_registry, tool_spec=agent_definition.tools())
+    integration_runtime = build_integration_runtime(config)
 
     workflow_name = agent_definition.default_workflow_name()
     workflow_def = copy.deepcopy(agent_definition.load_workflow(workflow_name))
@@ -214,6 +219,8 @@ def retry_step_from_run(
         model=model,
         on_step=on_step,
         memory_store=memory_store,
+        middlewares=integration_runtime.middlewares(),
+        fallback_resolver=CompositeFallbackResolver(integration_runtime.fallback_resolvers()),
     )
 
     result = {

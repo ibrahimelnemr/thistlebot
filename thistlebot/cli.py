@@ -400,10 +400,15 @@ def _extract_sites_from_result(result: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _wordpress_config(config: dict) -> dict[str, Any]:
-    cfg = config.get("wordpress", {})
-    if isinstance(cfg, dict):
-        return cfg
-    return {}
+    integrations_cfg = config.get("integrations")
+    if not isinstance(integrations_cfg, dict):
+        integrations_cfg = {}
+        config["integrations"] = integrations_cfg
+    cfg = integrations_cfg.get("wordpress")
+    if not isinstance(cfg, dict):
+        cfg = {}
+        integrations_cfg["wordpress"] = cfg
+    return cfg
 
 
 def _wordpress_client(config: dict) -> WordPressRestClient:
@@ -433,7 +438,7 @@ def _wordpress_site_ref(config: dict, explicit_site: str | None) -> str:
         return str(int(blog_id))
     if isinstance(blog_id, str) and blog_id.strip():
         return blog_id.strip()
-    raise RuntimeError("Missing site/blog reference. Provide --site or set wordpress.blog in config.")
+    raise RuntimeError("Missing site/blog reference. Provide --site or set integrations.wordpress.blog in config.")
 
 
 def _ollama_base_url_from_config(config: dict) -> str:
@@ -1178,7 +1183,7 @@ def wordpress_login(
     wp_cfg = config.setdefault("wordpress", {})
     if not isinstance(wp_cfg, dict):
         wp_cfg = {}
-        config["wordpress"] = wp_cfg
+        config.setdefault("integrations", {})["wordpress"] = wp_cfg
 
     configured_client_id = client_id.strip() or str(wp_cfg.get("client_id") or "")
     configured_client_secret = client_secret.strip() or str(wp_cfg.get("client_secret") or "")
@@ -1222,7 +1227,7 @@ def wordpress_login(
     wp_cfg["expires_in"] = token_data.get("expires_in")
     wp_cfg["expires_at"] = token_data.get("expires_at")
 
-    config["wordpress"] = wp_cfg
+    config.setdefault("integrations", {})["wordpress"] = wp_cfg
     write_config(config, force=True)
     typer.echo("WordPress token stored in ~/.thistlebot/config.json")
 
@@ -1292,7 +1297,7 @@ def wordpress_sites() -> None:
                     wp_cfg["blog"] = parsed.netloc
                 else:
                     wp_cfg["blog"] = site_url
-        config["wordpress"] = wp_cfg
+        config.setdefault("integrations", {})["wordpress"] = wp_cfg
         write_config(config, force=True)
 
     for item in sites:
@@ -1372,7 +1377,7 @@ def wordpress_logout(
     wp_cfg = _wordpress_config(config)
     for key in ("token", "token_type", "expires_in", "expires_at", "blog", "blog_id", "blog_url"):
         wp_cfg[key] = None
-    config["wordpress"] = wp_cfg
+    config.setdefault("integrations", {})["wordpress"] = wp_cfg
     write_config(config, force=True)
     typer.echo("WordPress credentials cleared.")
 
@@ -1616,10 +1621,7 @@ def _prompt_schedule_preset() -> tuple[dict[str, Any], str]:
 
 
 def _ensure_wordpress_login(config: dict[str, Any]) -> dict[str, Any]:
-    wp_cfg = config.get("wordpress")
-    if not isinstance(wp_cfg, dict):
-        wp_cfg = {}
-        config["wordpress"] = wp_cfg
+    wp_cfg = _wordpress_config(config)
 
     client_id = str(wp_cfg.get("client_id") or "").strip()
     client_secret = str(wp_cfg.get("client_secret") or "").strip()
@@ -1663,7 +1665,7 @@ def _ensure_wordpress_login(config: dict[str, Any]) -> dict[str, Any]:
     wp_cfg["token_type"] = token_data.get("token_type")
     wp_cfg["expires_in"] = token_data.get("expires_in")
     wp_cfg["expires_at"] = token_data.get("expires_at")
-    config["wordpress"] = wp_cfg
+    config.setdefault("integrations", {})["wordpress"] = wp_cfg
     return wp_cfg
 
 
@@ -1679,17 +1681,17 @@ def _pick_wordpress_site(config: dict[str, Any]) -> str:
         domain = parsed.netloc or blog_url
         if domain:
             wp_cfg["blog"] = domain
-            config["wordpress"] = wp_cfg
+            config.setdefault("integrations", {})["wordpress"] = wp_cfg
             return domain
 
     blog_id = wp_cfg.get("blog_id")
     if isinstance(blog_id, (int, float)):
         wp_cfg["blog"] = str(int(blog_id))
-        config["wordpress"] = wp_cfg
+        config.setdefault("integrations", {})["wordpress"] = wp_cfg
         return str(int(blog_id))
     if isinstance(blog_id, str) and blog_id.strip():
         wp_cfg["blog"] = blog_id.strip()
-        config["wordpress"] = wp_cfg
+        config.setdefault("integrations", {})["wordpress"] = wp_cfg
         return blog_id.strip()
 
     client = _wordpress_client(config)
@@ -1750,7 +1752,7 @@ def _pick_wordpress_site(config: dict[str, Any]) -> str:
     site_id = selected_item.get("ID") if isinstance(selected_item, dict) else None
     if site_id is not None:
         wp_cfg["blog_id"] = site_id
-    config["wordpress"] = wp_cfg
+    config.setdefault("integrations", {})["wordpress"] = wp_cfg
     return selected_domain
 
 
@@ -1766,21 +1768,22 @@ def _default_agent_name() -> str:
         index += 1
 
 
-def _template_source_path(template: str) -> Path:
+def _template_source_path(template: str, *, pack: str = "blogging") -> Path:
     template_cfg = _AGENT_TEMPLATES.get(template)
     if not isinstance(template_cfg, dict):
         raise RuntimeError(f"Unknown template '{template}'.")
     source_dir = template_cfg.get("source_dir")
     if not isinstance(source_dir, str) or not source_dir:
         raise RuntimeError(f"Template '{template}' has no source directory configured.")
-    source = Path(__file__).resolve().parent / "agents" / "templates" / source_dir
-    if not source.exists() or not source.is_dir():
-        raise RuntimeError(f"Template source not found: {source}")
-    return source
+    package_root = Path(__file__).resolve().parent
+    pack_source = package_root / "packs" / pack / "agents" / source_dir
+    if not pack_source.exists() or not pack_source.is_dir():
+        raise RuntimeError(f"Template source not found: {pack_source}")
+    return pack_source
 
 
-def _create_agent_from_template(agent_name: str, template: str) -> str:
-    source = _template_source_path(template)
+def _create_agent_from_template(agent_name: str, template: str, *, pack: str = "blogging") -> str:
+    source = _template_source_path(template, pack=pack)
     target = Path(__file__).resolve().parent / "agents" / agent_name
     if target.exists():
         shutil.copytree(source, target, dirs_exist_ok=True)
@@ -1789,19 +1792,53 @@ def _create_agent_from_template(agent_name: str, template: str) -> str:
         shutil.copytree(source, target)
         create_state = "created"
 
-    manifest_path = target / "agent.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["name"] = agent_name
-    defaults = manifest.get("config", {}).get("defaults", {})
-    if isinstance(defaults, dict):
-        template_cfg = _AGENT_TEMPLATES.get(template, _AGENT_TEMPLATES["ai"])
-        defaults["topic"] = template_cfg.get("default_topic", _AGENT_TEMPLATES["ai"]["default_topic"])
-        defaults["topic_template"] = template
-        defaults["post_status"] = "draft"
-        defaults["publish_mode"] = "draft"
-        defaults["enforce_draft_mode"] = True
-    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    _apply_template_defaults(target, agent_name=agent_name, template=template)
     return create_state
+
+
+def _apply_template_defaults(target: Path, *, agent_name: str, template: str) -> None:
+    template_cfg = _AGENT_TEMPLATES.get(template, _AGENT_TEMPLATES["ai"])
+    default_topic = template_cfg.get("default_topic", _AGENT_TEMPLATES["ai"]["default_topic"])
+
+    agent_md_path = target / "AGENT.md"
+    if not agent_md_path.exists():
+        return
+
+    text = agent_md_path.read_text(encoding="utf-8")
+    frontmatter: dict[str, Any] = {}
+    body = text
+    if text.startswith("---"):
+        parts = text.split("---", 2)
+        if len(parts) >= 3:
+            import yaml
+
+            frontmatter = yaml.safe_load(parts[1]) or {}
+            body = parts[2].lstrip("\n")
+
+    frontmatter["name"] = agent_name
+    ext = frontmatter.get("x-thistlebot")
+    if not isinstance(ext, dict):
+        ext = {}
+        frontmatter["x-thistlebot"] = ext
+    config_ext = ext.get("config")
+    if not isinstance(config_ext, dict):
+        config_ext = {}
+        ext["config"] = config_ext
+    defaults_ext = config_ext.get("defaults")
+    if not isinstance(defaults_ext, dict):
+        defaults_ext = {}
+        config_ext["defaults"] = defaults_ext
+
+    defaults_ext["topic"] = default_topic
+    defaults_ext["topic_template"] = template
+    defaults_ext["post_status"] = "draft"
+    defaults_ext["publish_mode"] = "draft"
+    defaults_ext["enforce_draft_mode"] = True
+
+    import yaml
+
+    rendered_frontmatter = yaml.safe_dump(frontmatter, sort_keys=False, allow_unicode=True)
+    agent_md_path.write_text(f"---\n{rendered_frontmatter}---\n\n{body.lstrip()}", encoding="utf-8")
 
 
 def _workflow_alias(agent_name: str, value: str | None) -> str:
@@ -1947,6 +1984,7 @@ def agent_list() -> None:
 
 @agent_app.command("create")
 def agent_create(
+    pack: str = typer.Option("blogging", "--pack", help="Pack name (default: blogging)"),
     template: str = typer.Option("ai", "--template", help="Template: ai|politics|finance"),
     name: Optional[str] = typer.Option(None, "--name", help="Agent name (default: bloggerN)"),
 ) -> None:
@@ -1956,7 +1994,8 @@ def agent_create(
         raise typer.Exit(code=1)
 
     agent_name = (name or "").strip() or _default_agent_name()
-    create_state = _create_agent_from_template(agent_name, chosen_template)
+    chosen_pack = (pack or "").strip().lower() or "blogging"
+    create_state = _create_agent_from_template(agent_name, chosen_template, pack=chosen_pack)
 
     _agent_setup_impl(
         name=agent_name,
@@ -2130,7 +2169,7 @@ def _build_agent_subapp(agent_name: str) -> typer.Typer:
 
     @subapp.command("action")
     def agent_action(
-        action: str = typer.Argument(..., help="Action name from agent.json actions"),
+        action: str = typer.Argument(..., help="Action name from AGENT.md actions"),
         arg: list[str] = typer.Option([], "--arg", help="Action args in key=value format. Repeat flag for multiple."),
     ) -> None:
         from .agents.loader import load_agent_definition
@@ -2145,10 +2184,20 @@ def _build_agent_subapp(agent_name: str) -> typer.Typer:
 
         handler_ref = action_def.get("handler")
         if not isinstance(handler_ref, str) or ":" not in handler_ref:
-            typer.echo("Invalid action handler in agent.json", err=True)
+            typer.echo("Invalid action handler in AGENT.md", err=True)
             raise typer.Exit(code=1)
         module_name, func_name = handler_ref.split(":", 1)
-        module = importlib.import_module(f"thistlebot.agents.{agent_name}.{module_name}")
+        module_path = agent_def.root / f"{module_name.replace('.', '/')}.py"
+        if module_path.exists():
+            spec_name = f"thistlebot.agents.{agent_name}.{module_name}"
+            spec = importlib.util.spec_from_file_location(spec_name, module_path)
+            if spec is None or spec.loader is None:
+                typer.echo("Unable to load action module", err=True)
+                raise typer.Exit(code=1)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+        else:
+            module = importlib.import_module(f"thistlebot.agents.{agent_name}.{module_name}")
         handler = getattr(module, func_name, None)
         if not callable(handler):
             typer.echo("Action handler is not callable", err=True)
@@ -2203,11 +2252,17 @@ def skill_list(
     else:
         # Search all agent skill directories
         agents_root = _Path(__file__).resolve().parent / "agents"
+        packs_root = _Path(__file__).resolve().parent / "packs"
         search_paths = [
             child / "skills"
             for child in agents_root.iterdir()
             if child.is_dir() and not child.name.startswith("__")
         ]
+        if packs_root.exists():
+            for pack_dir in packs_root.iterdir():
+                if not pack_dir.is_dir() or pack_dir.name.startswith("__"):
+                    continue
+                search_paths.append(pack_dir / "skills")
 
     skills = list_skills(search_paths)
     if not skills:
@@ -2241,11 +2296,17 @@ def skill_run(
         search_paths = agent_def._skill_search_paths()
     else:
         agents_root = _Path(__file__).resolve().parent / "agents"
+        packs_root = _Path(__file__).resolve().parent / "packs"
         search_paths = [
             child / "skills"
             for child in agents_root.iterdir()
             if child.is_dir() and not child.name.startswith("__")
         ]
+        if packs_root.exists():
+            for pack_dir in packs_root.iterdir():
+                if not pack_dir.is_dir() or pack_dir.name.startswith("__"):
+                    continue
+                search_paths.append(pack_dir / "skills")
 
     skill = load_skill(skill_name, search_paths)
     typer.echo(f"Running skill '{skill.name}'...")
@@ -2267,83 +2328,111 @@ def skill_run(
 def agent_migrate(
     name: str = typer.Argument(..., help="Agent name to migrate"),
 ) -> None:
-    """Migrate an agent from agent.json+prompts/ to AGENT.md+skills/."""
+    """Migrate a legacy agent into strict AGENT.md + skills format."""
     from pathlib import Path as _Path
+    import yaml as _yaml
     import shutil as _shutil
-    from .agents.loader import load_agent_definition
 
-    agent_def = load_agent_definition(name)
-    root = agent_def.root
+    root = _Path(__file__).resolve().parent / "agents" / name
+    if not root.exists() or not root.is_dir():
+        typer.echo(f"Agent directory not found: {root}", err=True)
+        raise typer.Exit(code=1)
 
-    agent_json = root / "agent.json"
     agent_md = root / "AGENT.md"
-    if agent_md.exists():
-        typer.echo(f"AGENT.md already exists for '{name}'. Nothing to do.")
+    agent_json = root / "agent.json"
+
+    if agent_md.exists() and not agent_json.exists():
+        typer.echo(f"'{name}' already uses AGENT.md + skills format.")
         return
 
-    # Build AGENT.md content from existing manifest
-    manifest = agent_def.manifest
-    tools_native = []
-    tools_mcp = []
-    raw_tools = manifest.get("tools", {})
-    if isinstance(raw_tools, dict):
-        tools_native = raw_tools.get("native", [])
-        tools_mcp = raw_tools.get("mcp", [])
-    all_tools = tools_native + tools_mcp
+    if not agent_json.exists():
+        typer.echo(f"No legacy agent.json found for '{name}'. Nothing to migrate.")
+        return
 
-    ext = {
+    manifest = json.loads(agent_json.read_text(encoding="utf-8"))
+    if not isinstance(manifest, dict):
+        typer.echo(f"Invalid legacy manifest: {agent_json}", err=True)
+        raise typer.Exit(code=1)
+
+    raw_tools = manifest.get("tools") if isinstance(manifest.get("tools"), dict) else {}
+    allow_tools: list[str] = []
+    for key in ("native", "mcp"):
+        value = raw_tools.get(key)
+        if isinstance(value, list):
+            allow_tools.extend(str(item) for item in value if str(item).strip())
+
+    workflows = manifest.get("workflows") if isinstance(manifest.get("workflows"), dict) else {}
+    default_workflow = workflows.get("default") if isinstance(workflows.get("default"), str) else None
+    if not default_workflow:
+        default_workflow = "daily_publish"
+
+    workflow_section: dict[str, Any] = {"default": default_workflow}
+    aliases = manifest.get("workflow_aliases")
+    if isinstance(aliases, dict) and aliases:
+        workflow_section["aliases"] = aliases
+    overrides = manifest.get("workflow_overrides")
+    if isinstance(overrides, dict) and overrides:
+        workflow_section["overrides"] = overrides
+
+    ext: dict[str, Any] = {
         "config": manifest.get("config", {"defaults": {}, "required": []}),
+        "schedule": manifest.get("schedule", {"enabled": False}),
+        "workflow": workflow_section,
     }
-    if manifest.get("schedule"):
-        ext["schedule"] = manifest["schedule"]
-    if manifest.get("workflow_overrides"):
-        wf_section: dict[str, Any] = {"default": agent_def.default_workflow_name()}
-        wf_section.update(manifest["workflow_overrides"])
-        ext["workflow"] = wf_section
-    if manifest.get("hooks"):
+    if isinstance(manifest.get("hooks"), dict):
         ext["hooks"] = manifest["hooks"]
-    if manifest.get("actions"):
+    if isinstance(manifest.get("actions"), dict):
         ext["actions"] = manifest["actions"]
 
-    import yaml as _yaml
-    frontmatter_dict: dict[str, Any] = {
+    frontmatter: dict[str, Any] = {
         "name": manifest.get("name", name),
-        "version": manifest.get("version", "0.1.0"),
+        "version": manifest.get("version", "0.3.0"),
         "description": manifest.get("description", ""),
-        "tools": all_tools,
+        "tools": list(dict.fromkeys(allow_tools)),
         "disallowedTools": [],
         "model": manifest.get("model"),
         "x-thistlebot": ext,
     }
-    frontmatter_str = _yaml.dump(frontmatter_dict, default_flow_style=False, allow_unicode=True)
-    agent_md_content = f"---\n{frontmatter_str}---\n\n{manifest.get('description', name)} agent.\n"
-    agent_md.write_text(agent_md_content, encoding="utf-8")
-    typer.echo(f"Created {agent_md}")
 
-    # Convert prompts/*.md → skills/*/SKILL.md
-    prompts_dir = root / "prompts"
+    fm = _yaml.safe_dump(frontmatter, sort_keys=False, allow_unicode=True)
+    body = str(manifest.get("description") or f"You are {name}.")
+    agent_md.write_text(f"---\n{fm}---\n\n{body}\n", encoding="utf-8")
+
+    prompts = manifest.get("prompts") if isinstance(manifest.get("prompts"), dict) else {}
     skills_dir = root / "skills"
-    if prompts_dir.exists():
-        skills_dir.mkdir(exist_ok=True)
-        prompts_map = manifest.get("prompts", {})
-        for prompt_name, prompt_rel in prompts_map.items():
-            prompt_path = root / prompt_rel
-            if not prompt_path.exists():
-                continue
-            skill_dir = skills_dir / prompt_name
-            skill_dir.mkdir(exist_ok=True)
-            skill_md = skill_dir / "SKILL.md"
-            if skill_md.exists():
-                typer.echo(f"  {skill_md} already exists, skipping")
-                continue
-            prompt_text = prompt_path.read_text(encoding="utf-8")
-            skill_frontmatter = {"name": prompt_name, "description": f"{prompt_name} skill", "allowed-tools": []}
-            fm_str = _yaml.dump(skill_frontmatter, default_flow_style=False, allow_unicode=True)
-            skill_md.write_text(f"---\n{fm_str}---\n{prompt_text}", encoding="utf-8")
-            typer.echo(f"  Created {skill_md}")
+    skills_dir.mkdir(exist_ok=True)
+    for skill_name, prompt_rel in prompts.items():
+        prompt_path = root / str(prompt_rel)
+        if not prompt_path.exists():
+            continue
+        text = prompt_path.read_text(encoding="utf-8")
+        skill_path = skills_dir / str(skill_name) / "SKILL.md"
+        skill_path.parent.mkdir(parents=True, exist_ok=True)
+        skill_fm = _yaml.safe_dump(
+            {"name": str(skill_name), "description": f"{skill_name} skill", "allowed-tools": []},
+            sort_keys=False,
+            allow_unicode=True,
+        )
+        skill_path.write_text(f"---\n{skill_fm}---\n{text}", encoding="utf-8")
 
-    typer.echo(f"\nMigration complete for '{name}'.")
-    typer.echo("Both agent.json and prompts/ are kept intact. Remove them when ready.")
+    workflows_dir = root / "workflows"
+    if workflows_dir.exists():
+        for wf in workflows_dir.glob("*.json"):
+            workflow_data = json.loads(wf.read_text(encoding="utf-8"))
+            if isinstance(workflow_data, dict) and isinstance(workflow_data.get("steps"), list):
+                for step in workflow_data["steps"]:
+                    if not isinstance(step, dict):
+                        continue
+                    prompt_name = step.pop("prompt", None)
+                    if isinstance(prompt_name, str) and prompt_name.strip() and not step.get("skill"):
+                        step["skill"] = prompt_name
+                wf.write_text(json.dumps(workflow_data, indent=2) + "\n", encoding="utf-8")
+
+    prompts_dir = root / "prompts"
+    if prompts_dir.exists():
+        _shutil.rmtree(prompts_dir)
+    agent_json.unlink()
+    typer.echo(f"Migration complete for '{name}'.")
 
 
 if __name__ == "__main__":

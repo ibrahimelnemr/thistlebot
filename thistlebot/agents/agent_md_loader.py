@@ -1,4 +1,4 @@
-"""Parser for AGENT.md format — converts to the same AgentDefinition used by agent.json."""
+"""Parser for strict AGENT.md format."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -56,7 +56,9 @@ def _build_manifest(
     tools_flat = frontmatter.get("tools") or []
     disallowed = frontmatter.get("disallowedTools") or []
     if isinstance(tools_flat, list):
-        manifest["tools"] = {"allow": tools_flat, "deny": disallowed}
+        allow_patterns = [str(item) for item in tools_flat if str(item).strip()]
+        deny_patterns = [str(item) for item in disallowed] if isinstance(disallowed, list) else []
+        manifest["tools"] = {"allow": allow_patterns, "deny": deny_patterns}
     else:
         manifest["tools"] = {}
 
@@ -65,7 +67,7 @@ def _build_manifest(
         manifest["model"] = frontmatter["model"]
 
     # x-thistlebot extensions
-    if "config" in ext:
+    if "config" in ext and isinstance(ext["config"], dict):
         manifest["config"] = ext["config"]
     else:
         manifest["config"] = {"defaults": {}, "required": []}
@@ -73,11 +75,15 @@ def _build_manifest(
     if "schedule" in ext:
         manifest["schedule"] = ext["schedule"]
 
-    if "workflow_overrides" in ext:
+    if "workflow_overrides" in ext and isinstance(ext["workflow_overrides"], dict):
         manifest["workflow_overrides"] = ext["workflow_overrides"]
     elif "workflow" in ext:
         wf_ext = ext["workflow"] if isinstance(ext["workflow"], dict) else {}
-        overrides = {k: v for k, v in wf_ext.items() if k not in {"default", "aliases"}}
+        explicit_overrides = wf_ext.get("overrides")
+        if isinstance(explicit_overrides, dict):
+            overrides = explicit_overrides
+        else:
+            overrides = {k: v for k, v in wf_ext.items() if k not in {"default", "aliases", "overrides"}}
         if overrides:
             manifest["workflow_overrides"] = overrides
 
@@ -111,13 +117,9 @@ def _build_manifest(
 
     manifest["workflows"] = workflows
 
-    # Prompts: build from prompts/ directory (for backward compat) or skills/
-    prompts_dir = root / "prompts"
-    prompts: dict[str, str] = {}
-    if prompts_dir.exists():
-        for prompt_file in prompts_dir.glob("*.md"):
-            prompts[prompt_file.stem] = f"prompts/{prompt_file.name}"
-    manifest["prompts"] = prompts
+    plugin_root = _discover_plugin_root(root)
+    if plugin_root is not None:
+        manifest["_plugin_root"] = str(plugin_root)
 
     return manifest
 
@@ -135,3 +137,22 @@ def _validate_agent_md_manifest(manifest: dict[str, Any], path: Path) -> None:
         raise ValueError(
             f"AGENT.md agent '{manifest.get('name')}' has no workflows in workflows/ directory: {path}"
         )
+    skills_dir = path.parent / "skills"
+    plugin_root = manifest.get("_plugin_root")
+    has_plugin_skills = isinstance(plugin_root, str) and (Path(plugin_root) / "skills").exists()
+    if not skills_dir.exists() and not has_plugin_skills:
+        raise ValueError(
+            f"AGENT.md agent '{manifest.get('name')}' has no skills directory: {skills_dir}"
+        )
+
+
+def _discover_plugin_root(agent_root: Path) -> Path | None:
+    # Expected plugin layout: <plugin_root>/agents/<agent_name>/AGENT.md
+    agents_dir = agent_root.parent
+    if agents_dir.name != "agents":
+        return None
+    plugin_root = agents_dir.parent
+    marker = plugin_root / ".thistlebot-plugin" / "plugin.json"
+    if marker.exists():
+        return plugin_root
+    return None

@@ -5,6 +5,7 @@ import json
 from typing import Any
 
 from ...integrations.mcp.registry import MCPRegistry
+from ...integrations.registry import discover_integrations
 from .base import ToolEntry, ToolResult, ToolSpec
 from .native import NativeTools
 from .policy import ToolPolicy
@@ -60,47 +61,21 @@ def build_tool_registry(
     if native_enabled:
         native = NativeTools(policy, config=config)
         _register_native_tools(registry, native)
+    for integration in discover_integrations(config):
+        integration.register_tools(registry)
 
     if config.get("mcp", {}).get("enabled") and mcp_registry is not None:
         for mcp_entry in mcp_registry.tool_entries():
             registry.register(mcp_entry)
 
-    if isinstance(tool_spec, dict) and tool_spec:
-        # Support both old nested format and new flat allow/deny format
-        if "allow" in tool_spec or "deny" in tool_spec:
-            allow = tool_spec.get("allow") or []
-            deny = tool_spec.get("deny") or []
-            registry = filter_by_allowlist_denylist(registry, allow or None, deny or None)
-        else:
-            registry = _filter_registry_by_spec(registry, tool_spec)
+    if isinstance(tool_spec, dict):
+        allow_raw = tool_spec.get("allow")
+        deny_raw = tool_spec.get("deny")
+        allow = [str(item) for item in allow_raw] if isinstance(allow_raw, list) else None
+        deny = [str(item) for item in deny_raw] if isinstance(deny_raw, list) else None
+        registry = filter_by_allowlist_denylist(registry, allow, deny)
 
     return registry
-
-
-def _filter_registry_by_spec(registry: ToolRegistry, tool_spec: dict[str, Any]) -> ToolRegistry:
-    native_patterns = tool_spec.get("native") if isinstance(tool_spec.get("native"), list) else []
-    mcp_patterns = tool_spec.get("mcp") if isinstance(tool_spec.get("mcp"), list) else []
-    allow_filesystem = bool(tool_spec.get("filesystem", False))
-    allow_exec = bool(tool_spec.get("exec", False))
-
-    selected = ToolRegistry()
-    for name, entry in registry._tools.items():
-        is_native = entry.source == "native"
-        is_mcp = entry.source == "mcp"
-
-        if is_native:
-            if name == "exec" and not allow_exec:
-                continue
-            if name in {"list_dir", "read_file", "write_file", "edit_file"} and not allow_filesystem:
-                continue
-            if native_patterns and not any(fnmatch.fnmatch(name, pattern) for pattern in native_patterns):
-                continue
-
-        if is_mcp and mcp_patterns and not any(fnmatch.fnmatch(name, pattern) for pattern in mcp_patterns):
-            continue
-
-        selected.register(entry)
-    return selected
 
 
 def _register_native_tools(registry: ToolRegistry, native: NativeTools) -> None:
@@ -115,109 +90,6 @@ def _register_native_tools(registry: ToolRegistry, native: NativeTools) -> None:
                 },
             ),
             execute=native.list_dir,
-            source="native",
-        )
-    )
-    registry.register(
-        ToolEntry(
-            spec=ToolSpec(
-                name="wordpress.list_sites",
-                description="List WordPress.com sites available to the configured REST token.",
-                input_schema={"type": "object", "properties": {}},
-            ),
-            execute=native.wordpress_list_sites,
-            source="native",
-        )
-    )
-    registry.register(
-        ToolEntry(
-            spec=ToolSpec(
-                name="wordpress.list_posts",
-                description="List posts for a WordPress site via REST API.",
-                input_schema={
-                    "type": "object",
-                    "required": ["site"],
-                    "properties": {
-                        "site": {"type": "string"},
-                        "number": {"type": "integer"},
-                        "status": {"type": "string"},
-                    },
-                },
-            ),
-            execute=native.wordpress_list_posts,
-            source="native",
-        )
-    )
-    registry.register(
-        ToolEntry(
-            spec=ToolSpec(
-                name="wordpress.create_post",
-                description="Create a WordPress post via REST API.",
-                input_schema={
-                    "type": "object",
-                    "required": ["site", "title", "content"],
-                    "properties": {
-                        "site": {"type": "string"},
-                        "title": {"type": "string"},
-                        "content": {"type": "string"},
-                        "status": {"type": "string"},
-                        "tags": {
-                            "oneOf": [
-                                {"type": "string"},
-                                {"type": "array", "items": {"type": "string"}},
-                            ]
-                        },
-                        "categories": {
-                            "oneOf": [
-                                {"type": "string"},
-                                {"type": "array", "items": {"type": "string"}},
-                            ]
-                        },
-                    },
-                },
-                risk_level="medium",
-            ),
-            execute=native.wordpress_create_post,
-            source="native",
-        )
-    )
-    registry.register(
-        ToolEntry(
-            spec=ToolSpec(
-                name="wordpress.update_post",
-                description="Update a WordPress post via REST API.",
-                input_schema={
-                    "type": "object",
-                    "required": ["site", "post_id"],
-                    "properties": {
-                        "site": {"type": "string"},
-                        "post_id": {"type": "integer"},
-                        "title": {"type": "string"},
-                        "content": {"type": "string"},
-                        "status": {"type": "string"},
-                    },
-                },
-                risk_level="medium",
-            ),
-            execute=native.wordpress_update_post,
-            source="native",
-        )
-    )
-    registry.register(
-        ToolEntry(
-            spec=ToolSpec(
-                name="wordpress.get_post",
-                description="Get a WordPress post by ID via REST API.",
-                input_schema={
-                    "type": "object",
-                    "required": ["site", "post_id"],
-                    "properties": {
-                        "site": {"type": "string"},
-                        "post_id": {"type": "integer"},
-                    },
-                },
-            ),
-            execute=native.wordpress_get_post,
             source="native",
         )
     )

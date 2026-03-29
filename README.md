@@ -198,11 +198,11 @@ thistlebot agent create --template politics --name myblog
 
 Template sources are full agent skeletons under:
 
-- `thistlebot/agents/templates/ai-blogger/`
-- `thistlebot/agents/templates/politics-blogger/`
-- `thistlebot/agents/templates/finance-blogger/`
+- `thistlebot/packs/blogging/agents/ai-blogger/`
+- `thistlebot/packs/blogging/agents/politics-blogger/`
+- `thistlebot/packs/blogging/agents/finance-blogger/`
 
-Each template contains full framework artifacts (`agent.json`, prompts, workflows,
+Each template contains full framework artifacts (`AGENT.md`, `skills/*/SKILL.md`, workflows,
 hooks, actions), and `agent create` copies those files into a new
 `thistlebot/agents/<name>/` directory.
 
@@ -228,7 +228,7 @@ Why publish can fail:
 
 Reliability measures in place:
 
-- Prompt-level hardening in `publisher.md` requiring explicit tool invocation.
+- Skill-level hardening in `skills/publisher/SKILL.md` requiring explicit tool invocation.
 - Guard-level enforcement requiring successful create-post tool result.
 - Single-success guard blocks duplicate successful publish calls in one step.
 - Draft enforcement keeps post status as `draft` unless explicitly configured for publish mode.

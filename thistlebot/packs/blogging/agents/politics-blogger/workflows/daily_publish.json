@@ -1,0 +1,94 @@
+{
+  "id": "daily_publish",
+  "description": "Research, draft, iteratively revise, verify, and publish one article.",
+  "steps": [
+    {
+      "id": "research",
+      "type": "llm",
+      "skill": "researcher",
+      "input": {
+        "topic": "{{config.topic}}"
+      },
+      "output_artifact": "research.md",
+      "artifact_key": "research",
+      "max_iterations": 12
+    },
+    {
+      "id": "draft",
+      "type": "llm",
+      "skill": "writer",
+      "input": {
+        "topic": "{{config.topic}}",
+        "research": "{{artifacts.research}}"
+      },
+      "output_artifact": "draft_v1.md",
+      "artifact_key": "draft_current",
+      "max_iterations": 10
+    },
+    {
+      "id": "edit",
+      "type": "llm",
+      "skill": "editor",
+      "input": {
+        "topic": "{{config.topic}}",
+        "research": "{{artifacts.research}}",
+        "draft": "{{artifacts.draft_current}}",
+        "revision_number": "{{runtime.revision_number}}"
+      },
+      "output_artifact": "draft_edit.md",
+      "artifact_key": "draft_current",
+      "max_iterations": 8
+    },
+    {
+      "id": "verify",
+      "type": "llm",
+      "skill": "fact_checker",
+      "input": {
+        "topic": "{{config.topic}}",
+        "draft": "{{artifacts.draft_current}}"
+      },
+      "output_artifact": "qa_report.md",
+      "artifact_key": "qa_report",
+      "max_iterations": 6
+    },
+    {
+      "id": "publish",
+      "type": "llm",
+      "skill": "publisher",
+      "required_success_tools": [
+        "wordpress.create_post"
+      ],
+      "fallback": {
+        "tool": "wordpress.create_post",
+        "required_fields": [
+          "site",
+          "title",
+          "content",
+          "status"
+        ],
+        "args_from_inputs": {
+          "site": "site",
+          "title": "__derive_title__",
+          "content": "__derive_body__",
+          "status": "post_status",
+          "tags": "__derive_tags__"
+        }
+      },
+      "input": {
+        "site": "{{config.site}}",
+        "post_status": "{{config.post_status}}",
+        "draft": "{{artifacts.draft_current}}",
+        "qa_report": "{{artifacts.qa_report}}"
+      },
+      "output_artifact": "final.md",
+      "artifact_key": "publish_summary",
+      "max_iterations": 8
+    }
+  ],
+  "revision_loop": {
+    "edit_step": "edit",
+    "verify_step": "verify",
+    "max_revisions": 2,
+    "pass_token": "VERDICT: PASS"
+  }
+}

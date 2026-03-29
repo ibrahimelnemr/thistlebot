@@ -1,0 +1,13 @@
+{
+  "name": "blogging",
+  "description": "Autonomous blog publishing with research, writing, editing, and quality gates.",
+  "version": "0.3.0",
+  "author": { "name": "thistlebot" },
+  "integrations": ["wordpress"],
+  "middleware": [
+    { "module": "middleware.publish_guard", "class": "WordPressPublishGuard" }
+  ],
+  "fallback_resolvers": [
+    "middleware.publish_guard:BlogDraftFallbackResolver"
+  ]
+}

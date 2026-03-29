@@ -64,25 +64,7 @@ class AgentDefinition:
                 return str(key)
         raise ValueError(f"No workflows configured for agent '{self.name}'")
 
-    def prompt_path(self, prompt_name: str) -> Path:
-        prompts = self.manifest.get("prompts", {})
-        if not isinstance(prompts, dict):
-            raise ValueError(f"Invalid prompts map for agent '{self.name}'")
-        rel = prompts.get(prompt_name)
-        if not isinstance(rel, str) or not rel.strip():
-            raise KeyError(f"Prompt '{prompt_name}' not found for agent '{self.name}'")
-        path = (self.root / rel).resolve()
-        if not path.exists():
-            raise FileNotFoundError(f"Prompt file not found: {path}")
-        return path
-
     def load_prompt(self, prompt_name: str) -> str:
-        # Try old-style prompts/<name>.md first (backward compat)
-        try:
-            return self.prompt_path(prompt_name).read_text(encoding="utf-8")
-        except (KeyError, FileNotFoundError):
-            pass
-        # Try SKILL.md format: skills/<name>/SKILL.md
         skill = self.load_skill(prompt_name)
         return skill.instructions
 
@@ -91,7 +73,11 @@ class AgentDefinition:
         return load_skill(skill_name, self._skill_search_paths())
 
     def _skill_search_paths(self) -> list[Path]:
-        return [self.root / "skills"]
+        paths: list[Path] = [self.root / "skills"]
+        plugin_root = self.manifest.get("_plugin_root")
+        if isinstance(plugin_root, str) and plugin_root.strip():
+            paths.append(Path(plugin_root) / "skills")
+        return paths
 
     def workflow_path(self, workflow_name: str) -> Path:
         workflows = self.manifest.get("workflows", {})
@@ -119,36 +105,8 @@ def load_agent_definition(agent_name: str, *, agents_root: Path | None = None) -
     else:
         root = agents_root or (Path(__file__).resolve().parent / agent_name)
 
-    if (root / "AGENT.md").exists():
-        from .agent_md_loader import load_from_agent_md
-        return load_from_agent_md(root, agent_name)
-
-    manifest_path = root / "agent.json"
-    if not manifest_path.exists():
-        raise FileNotFoundError(f"Agent definition not found: {manifest_path}")
-
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if not isinstance(manifest, dict):
-        raise ValueError(f"Invalid agent.json: {manifest_path}")
-
-    _validate_manifest(manifest, manifest_path)
-    resolved_name = manifest.get("name")
-    if isinstance(resolved_name, str) and resolved_name.strip() and resolved_name != agent_name:
-        raise ValueError(f"Agent name mismatch in {manifest_path}: {resolved_name} != {agent_name}")
-    return AgentDefinition(name=agent_name, root=root, manifest=manifest)
-
-
-def _validate_manifest(manifest: dict[str, Any], manifest_path: Path) -> None:
-    required = ("name", "prompts", "workflows", "config")
-    missing = [key for key in required if key not in manifest]
-    if missing:
-        raise ValueError(f"Agent definition missing keys {missing}: {manifest_path}")
-
-    if not isinstance(manifest.get("prompts"), dict):
-        raise ValueError(f"Agent prompts must be an object: {manifest_path}")
-
-    if not isinstance(manifest.get("workflows"), dict):
-        raise ValueError(f"Agent workflows must be an object: {manifest_path}")
-
-    if not isinstance(manifest.get("config"), dict):
-        raise ValueError(f"Agent config must be an object: {manifest_path}")
+    agent_md_path = root / "AGENT.md"
+    if not agent_md_path.exists():
+        raise FileNotFoundError(f"Agent definition not found: {agent_md_path}")
+    from .agent_md_loader import load_from_agent_md
+    return load_from_agent_md(root, agent_name)
