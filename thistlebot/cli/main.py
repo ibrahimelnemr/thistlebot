@@ -18,22 +18,22 @@ import typer
 from rich.console import Console
 from rich.markdown import Markdown
 
-from .core.chat_client import stream_chat
-from .core.gateway import run_gateway
-from .core.gateway_lifecycle import ensure_gateway
-from .core.meeting_graph import MeetingConfig, run_meeting_graph
-from .core.tools.registry import build_tool_registry
-from .integrations.github.oauth import login_with_device_flow, poll_for_token
-from .integrations.mcp.registry import build_mcp_registry
-from .integrations.wordpress.rest_client import WordPressRestClient
-from .integrations.wordpress.rest_oauth import (
+from ..core.chat_client import stream_chat
+from ..core.gateway import run_gateway
+from ..core.gateway_lifecycle import ensure_gateway
+from ..core.meeting_graph import MeetingConfig, run_meeting_graph
+from ..core.tools.registry import build_tool_registry
+from ..integrations.github.oauth import login_with_device_flow, poll_for_token
+from ..integrations.mcp.registry import build_mcp_registry
+from ..integrations.wordpress.rest_client import WordPressRestClient
+from ..integrations.wordpress.rest_oauth import (
     DEFAULT_REDIRECT_URI as WORDPRESS_DEFAULT_REDIRECT_URI,
     login_with_authorization_code_flow as wordpress_login_flow,
     token_expired as wordpress_token_expired,
 )
-from .llm.factory import get_default_model, get_llm_provider, get_provider_config, resolve_api_key, resolve_openrouter_api_key
-from .llm.openai_compatible_client import OpenAICompatibleClient
-from .storage.state import load_config, reset_storage, setup_storage, write_config
+from ..llm.factory import get_default_model, get_llm_provider, get_provider_config, resolve_api_key, resolve_openrouter_api_key
+from ..llm.openai_compatible_client import OpenAICompatibleClient
+from ..storage.state import load_config, reset_storage, setup_storage, write_config
 
 app = typer.Typer(add_completion=False)
 github_app = typer.Typer(help="GitHub integrations")
@@ -1517,7 +1517,7 @@ def _run_agent_workflow_command(
     topic: str | None = None,
     status: str | None = None,
 ) -> None:
-    from .agents.workflow import run_agent_workflow
+    from ..agents.workflow import run_agent_workflow
 
     config_overrides: dict[str, Any] = {}
     if topic is not None:
@@ -1757,7 +1757,7 @@ def _pick_wordpress_site(config: dict[str, Any]) -> str:
 
 
 def _default_agent_name() -> str:
-    from .agents.registry import list_agent_names
+    from ..agents.registry import list_agent_names
 
     existing = set(list_agent_names())
     index = 1
@@ -1842,7 +1842,7 @@ def _apply_template_defaults(target: Path, *, agent_name: str, template: str) ->
 
 
 def _workflow_alias(agent_name: str, value: str | None) -> str:
-    from .agents.loader import load_agent_definition
+    from ..agents.loader import load_agent_definition
 
     alias_or_name = str(value or "post").strip()
     agent_def = load_agent_definition(agent_name)
@@ -1857,8 +1857,8 @@ def _workflow_alias(agent_name: str, value: str | None) -> str:
 
 
 def _resolve_agent_schedule(name: str) -> dict[str, Any]:
-    from .agents.config import load_agent_config
-    from .agents.loader import load_agent_definition
+    from ..agents.config import load_agent_config
+    from ..agents.loader import load_agent_definition
 
     agent_def = load_agent_definition(name)
     cfg = load_agent_config(name, agent_def)
@@ -1869,9 +1869,9 @@ def _resolve_agent_schedule(name: str) -> dict[str, Any]:
 
 
 def _agent_start_impl(name: str, *, foreground: bool) -> None:
-    from .agents.runner import AgentDaemon, is_agent_daemon_running
-    from .agents.workflow import run_agent_workflow
-    from .storage.paths import agent_log_path
+    from ..agents.runner import AgentDaemon, is_agent_daemon_running
+    from ..agents.workflow import run_agent_workflow
+    from ..storage.paths import agent_log_path
 
     schedule_cfg = _resolve_agent_schedule(name)
     if not bool(schedule_cfg.get("enabled", False)):
@@ -1910,8 +1910,8 @@ def _agent_setup_impl(
     post_status: str,
     yes: bool,
 ) -> None:
-    from .agents.config import load_agent_config, runtime_agent_config_path, save_agent_runtime_config
-    from .agents.loader import load_agent_definition
+    from ..agents.config import load_agent_config, runtime_agent_config_path, save_agent_runtime_config
+    from ..agents.loader import load_agent_definition
 
     config = load_config()
     _ensure_mcp_for_blogger(config)
@@ -1972,7 +1972,7 @@ def _agent_setup_impl(
 
 @agent_app.command("list")
 def agent_list() -> None:
-    from .agents.registry import discover_agents
+    from ..agents.registry import discover_agents
 
     agents = discover_agents()
     if not agents:
@@ -2050,8 +2050,8 @@ def _build_agent_subapp(agent_name: str) -> typer.Typer:
 
     @config_subapp.command("show")
     def agent_config_show() -> None:
-        from .agents.config import load_agent_config
-        from .agents.loader import load_agent_definition
+        from ..agents.config import load_agent_config
+        from ..agents.loader import load_agent_definition
 
         agent_def = load_agent_definition(agent_name)
         cfg = load_agent_config(agent_name, agent_def)
@@ -2061,8 +2061,8 @@ def _build_agent_subapp(agent_name: str) -> typer.Typer:
     def agent_config_set(
         kv: list[str] = typer.Argument(..., help="One or more key=value pairs"),
     ) -> None:
-        from .agents.config import load_agent_config, save_agent_runtime_config
-        from .agents.loader import load_agent_definition
+        from ..agents.config import load_agent_config, save_agent_runtime_config
+        from ..agents.loader import load_agent_definition
 
         agent_def = load_agent_definition(agent_name)
         cfg = load_agent_config(agent_name, agent_def)
@@ -2102,10 +2102,10 @@ def _build_agent_subapp(agent_name: str) -> typer.Typer:
 
     @subapp.command("status")
     def agent_status(limit: int = typer.Option(5, "--limit", "-n", help="Number of recent runs to show")) -> None:
-        from .agents.config import list_runs, load_agent_config
-        from .agents.loader import load_agent_definition
-        from .agents.memory import JsonFileMemoryStore
-        from .agents.runner import is_agent_daemon_running, read_agent_state
+        from ..agents.config import list_runs, load_agent_config
+        from ..agents.loader import load_agent_definition
+        from ..agents.memory import JsonFileMemoryStore
+        from ..agents.runner import is_agent_daemon_running, read_agent_state
 
         agent_def = load_agent_definition(agent_name)
         cfg = load_agent_config(agent_name, agent_def)
@@ -2150,7 +2150,7 @@ def _build_agent_subapp(agent_name: str) -> typer.Typer:
 
     @subapp.command("stop")
     def agent_stop() -> None:
-        from .agents.runner import stop_agent_daemon
+        from ..agents.runner import stop_agent_daemon
 
         ok = stop_agent_daemon(agent_name)
         if not ok:
@@ -2160,8 +2160,8 @@ def _build_agent_subapp(agent_name: str) -> typer.Typer:
 
     @subapp.command("daemon-run", hidden=True)
     def agent_daemon_run() -> None:
-        from .agents.runner import AgentDaemon
-        from .agents.workflow import run_agent_workflow
+        from ..agents.runner import AgentDaemon
+        from ..agents.workflow import run_agent_workflow
 
         schedule_cfg = _resolve_agent_schedule(agent_name)
         daemon = AgentDaemon(agent_name=agent_name, schedule_config=schedule_cfg, run_once=lambda: run_agent_workflow(agent_name))
@@ -2172,8 +2172,8 @@ def _build_agent_subapp(agent_name: str) -> typer.Typer:
         action: str = typer.Argument(..., help="Action name from AGENT.md actions"),
         arg: list[str] = typer.Option([], "--arg", help="Action args in key=value format. Repeat flag for multiple."),
     ) -> None:
-        from .agents.loader import load_agent_definition
-        from .llm.factory import build_llm_client, get_default_model
+        from ..agents.loader import load_agent_definition
+        from ..llm.factory import build_llm_client, get_default_model
 
         agent_def = load_agent_definition(agent_name)
         actions = agent_def.actions()
@@ -2224,7 +2224,7 @@ def _build_agent_subapp(agent_name: str) -> typer.Typer:
 
 
 def _register_agent_subapps() -> None:
-    from .agents.registry import discover_agents
+    from ..agents.registry import discover_agents
 
     for agent in discover_agents():
         agent_app.add_typer(_build_agent_subapp(agent.name), name=agent.name)
@@ -2243,10 +2243,10 @@ def skill_list(
 ) -> None:
     """List available skills."""
     from pathlib import Path as _Path
-    from .agents.skill_loader import list_skills
+    from ..agents.skill_loader import list_skills
 
     if agent:
-        from .agents.loader import load_agent_definition
+        from ..agents.loader import load_agent_definition
         agent_def = load_agent_definition(agent)
         search_paths = agent_def._skill_search_paths()
     else:
@@ -2281,8 +2281,8 @@ def skill_run(
 ) -> None:
     """Run a skill standalone."""
     from pathlib import Path as _Path
-    from .agents.skill_loader import load_skill
-    from .agents.skill_runner import run_skill_standalone
+    from ..agents.skill_loader import load_skill
+    from ..agents.skill_runner import run_skill_standalone
 
     config = load_config()
     model = get_default_model(config)
@@ -2291,7 +2291,7 @@ def skill_run(
     registry = build_tool_registry(config, mcp_registry)
 
     if agent:
-        from .agents.loader import load_agent_definition
+        from ..agents.loader import load_agent_definition
         agent_def = load_agent_definition(agent)
         search_paths = agent_def._skill_search_paths()
     else:
